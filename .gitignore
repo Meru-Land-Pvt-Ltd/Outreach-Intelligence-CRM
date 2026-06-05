@@ -1,0 +1,43 @@
+# dependencies
+node_modules/
+*/node_modules/
+
+# builds
+dist/
+build/
+.next/
+*/.next/
+.turbo/
+.cache/
+coverage/
+
+# env files - never push API keys
+.env
+.env.*
+backend/.env
+backend/.env.*
+worker/.env
+worker/.env.*
+frontend/.env
+frontend/.env.*
+frontend/.env.local
+
+# logs
+*.log
+logs/
+backend-log.txt
+worker-log.txt
+frontend-log.txt
+
+# OS files
+.DS_Store
+._*
+Thumbs.db
+
+# archives
+*.zip
+outreach-crm-audit.zip
+
+# misc
+.vscode/
+.idea/

@@ -1,0 +1,17 @@
+services:
+  mongodb:
+    image: mongo:7
+    container_name: outreach_mongodb
+    ports:
+      - "27017:27017"
+    volumes:
+      - outreach_mongo_data:/data/db
+
+  redis:
+    image: redis:7
+    container_name: outreach_redis
+    ports:
+      - "6379:6379"
+
+volumes:
+  outreach_mongo_data:

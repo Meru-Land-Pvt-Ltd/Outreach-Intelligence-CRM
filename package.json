@@ -1,0 +1,21 @@
+{
+  "name": "outreach-intelligence-crm",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "dev:backend": "npm run dev --prefix backend",
+    "dev:worker": "npm run dev --prefix worker",
+    "dev:frontend": "npm run dev --prefix frontend",
+    "install:backend": "npm install --prefix backend",
+    "install:worker": "npm install --prefix worker",
+    "install:frontend": "npm install --prefix frontend"
+  },
+  "dependencies": {
+    "@radix-ui/react-slot": "^1.2.4"
+  },
+  "devDependencies": {
+    "@tailwindcss/postcss": "^4.3.0",
+    "postcss": "^8.5.15",
+    "tailwindcss": "^4.3.0"
+  }
+}
