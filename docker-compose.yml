@@ -1,17 +1,52 @@
 services:
-  mongodb:
-    image: mongo:7
-    container_name: outreach_mongodb
-    ports:
-      - "27017:27017"
-    volumes:
-      - outreach_mongo_data:/data/db
-
   redis:
-    image: redis:7
-    container_name: outreach_redis
+    image: redis:7-alpine
+    container_name: outreach-crm-redis
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis_data:/data
+    restart: unless-stopped
+
+  backend:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    container_name: outreach-crm-backend
+    env_file:
+      - ./backend/.env.production
+    depends_on:
+      - redis
     ports:
-      - "6379:6379"
+      - "127.0.0.1:5000:5000"
+    restart: unless-stopped
+
+  worker:
+    build:
+      context: .
+      dockerfile: worker/Dockerfile
+    container_name: outreach-crm-worker
+    env_file:
+      - ./worker/.env.production
+    depends_on:
+      - redis
+      - backend
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: .
+      dockerfile: frontend/Dockerfile
+      args:
+        NEXT_PUBLIC_API_BASE_URL: https://outreach.enoylitystudio.com/api
+    container_name: outreach-crm-frontend
+    environment:
+      NEXT_PUBLIC_API_BASE_URL: https://outreach.enoylitystudio.com/api
+      NODE_ENV: production
+    depends_on:
+      - backend
+    ports:
+      - "127.0.0.1:3000:3000"
+    restart: unless-stopped
 
 volumes:
-  outreach_mongo_data:
+  redis_data:
