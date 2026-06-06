@@ -33,10 +33,10 @@ export function EmailDiscoveryTabs() {
   const pathname = usePathname();
 
   return (
-    <div className="mb-6 w-full overflow-x-auto">
+    <div className="w-full overflow-x-auto pb-1">
       <nav
         aria-label="Email discovery navigation"
-        className="inline-flex min-w-max items-center gap-1 rounded-xl border border-slate-200 bg-slate-50 p-1 shadow-sm"
+        className="inline-flex min-w-max items-center gap-2 rounded-2xl border border-slate-200 bg-white p-1.5 shadow-sm"
       >
         {tabs.map((tab) => {
           const Icon = tab.icon;
@@ -51,15 +51,23 @@ export function EmailDiscoveryTabs() {
               href={tab.href}
               aria-current={active ? "page" : undefined}
               className={cn(
-                "inline-flex h-9 shrink-0 items-center justify-center gap-2 whitespace-nowrap rounded-lg px-4 text-sm font-medium transition-all",
-                "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-slate-400 focus-visible:ring-offset-2",
+                "group inline-flex h-10 shrink-0 items-center justify-center gap-2 whitespace-nowrap rounded-xl px-4 text-sm font-semibold transition-all duration-200",
+                "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 focus-visible:ring-offset-2",
                 active
-                  ? "!bg-slate-950 !text-white shadow-sm hover:!bg-slate-800 [&_svg]:!text-white"
-                  : "!text-slate-600 hover:!bg-white hover:!text-slate-950 [&_svg]:text-slate-500"
+                  ? "bg-blue-700 text-white shadow-md shadow-blue-700/20 hover:bg-blue-800 [&_svg]:text-white"
+                  : "bg-transparent text-slate-800 hover:bg-blue-50 hover:text-blue-700 [&_svg]:text-slate-500"
               )}
             >
-              <Icon className="h-4 w-4" />
-              <span>{tab.label}</span>
+              <Icon
+                className={cn(
+                  "h-4 w-4 transition-colors",
+                  active ? "text-white" : "text-slate-500 group-hover:text-blue-700"
+                )}
+              />
+
+              <span className={active ? "text-white" : ""}>
+                {tab.label}
+              </span>
             </Link>
           );
         })}

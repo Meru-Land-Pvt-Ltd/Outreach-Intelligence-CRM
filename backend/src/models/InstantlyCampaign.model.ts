@@ -14,6 +14,7 @@ const InstantlyCampaignSchema = new mongoose.Schema(
     dailyLimit: Number,
     leadsPushed: Number,
     validLeadsFound: Number,
+    selectedSenders: [String],
 
     status: String,
     pushedAt: Date,

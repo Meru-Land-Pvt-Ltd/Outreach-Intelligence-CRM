@@ -7,70 +7,50 @@ import { useEffect, useState } from "react";
 import {
   BarChart3,
   Building2,
-  CircleDollarSign,
+  ChevronDown,
+  ChevronsLeft,
   FileText,
   Home,
-  Megaphone,
   Menu,
+  Megaphone,
   PlayCircle,
   Search,
   ShieldX,
   Sparkles,
-  Users,
   Workflow,
   X,
+  type LucideIcon,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 
-const navItems = [
+type NavItem = {
+  title: string;
+  href: string;
+  activePath: string;
+  icon: LucideIcon;
+  exact?: boolean;
+  children?: NavItem[];
+};
+
+const navItems: NavItem[] = [
   {
-    title: "Dashboard",
-    href: "/",
-    activePath: "/",
+    title: "Control Panel",
+    href: "/control-panel",
+    activePath: "/control-panel",
     icon: Home,
   },
   {
-    title: "Closed Deals",
-    href: "/closed-deals",
-    activePath: "/closed-deals",
-    icon: CircleDollarSign,
+    title: "Raw Data",
+    href: "/raw-data",
+    activePath: "/raw-data",
+    icon: BarChart3,
   },
   {
-    title: "Raw Video Data",
-    href: "/raw-youtube",
-    activePath: "/raw-youtube",
-    icon: PlayCircle,
-  },
-  {
-    title: "BrandMap",
+    title: "Brand Map",
     href: "/brand-map",
     activePath: "/brand-map",
     icon: Building2,
-  },
-  {
-    title: "Email Discovery",
-    href: "/email-discovery",
-    activePath: "/email-discovery",
-    icon: Search,
-  },
-  {
-    title: "Contacts",
-    href: "/contacts",
-    activePath: "/contacts",
-    icon: Users,
-  },
-  {
-    title: "Instantly",
-    href: "/instantly-campaigns",
-    activePath: "/instantly-campaigns",
-    icon: Megaphone,
-  },
-  {
-    title: "Reviews",
-    href: "/reviews/enoylity",
-    activePath: "/reviews",
-    icon: PlayCircle,
   },
   {
     title: "Pipeline Tracker",
@@ -79,10 +59,62 @@ const navItems = [
     icon: Workflow,
   },
   {
-    title: "Niche Analysis",
-    href: "/niche-analysis",
-    activePath: "/niche-analysis",
-    icon: BarChart3,
+    title: "Email Discovery",
+    href: "/email-discovery",
+    activePath: "/email-discovery",
+    icon: Search,
+  },
+  {
+    title: "Enoylity Instantly",
+    href: "/enoylity-instantly",
+    activePath: "/enoylity-instantly",
+    icon: Megaphone,
+  },
+  {
+    title: "MHD Instantly",
+    href: "/mhd-instantly",
+    activePath: "/mhd-instantly",
+    icon: Megaphone,
+  },
+  {
+    title: "Instantly",
+    href: "/instantly-campaigns",
+    activePath: "/instantly-campaigns",
+    icon: Megaphone,
+    exact: true,
+    children: [
+      {
+        title: "Control Panel",
+        href: "/instantly-campaigns",
+        activePath: "/instantly-campaigns",
+        icon: Home,
+        exact: true,
+      },
+      {
+        title: "Enoylity Template",
+        href: "/instantly-campaigns/templates/enoylity",
+        activePath: "/instantly-campaigns/templates/enoylity",
+        icon: FileText,
+      },
+      {
+        title: "MHD Template",
+        href: "/instantly-campaigns/templates/mhd",
+        activePath: "/instantly-campaigns/templates/mhd",
+        icon: FileText,
+      },
+      {
+        title: "Push Log",
+        href: "/instantly-campaigns/push-logs",
+        activePath: "/instantly-campaigns/push-logs",
+        icon: FileText,
+      },
+    ],
+  },
+  {
+    title: "Reviews",
+    href: "/reviews/enoylity",
+    activePath: "/reviews",
+    icon: PlayCircle,
   },
   {
     title: "Excluded Brands",
@@ -98,111 +130,165 @@ const navItems = [
   },
 ];
 
-function isActivePath(pathname: string, activePath: string) {
-  if (activePath === "/") return pathname === "/";
-
+function isActivePath(pathname: string, activePath: string, exact = false) {
+  if (exact || activePath === "/") return pathname === activePath;
   return pathname === activePath || pathname.startsWith(`${activePath}/`);
+}
+
+function BrandLogo() {
+  return (
+    <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-blue-600 text-lg font-bold text-white shadow-sm">
+      O
+    </div>
+  );
 }
 
 function SidebarBrand() {
   return (
-    <Link
-      href="/"
-      className="flex w-full items-center gap-3 rounded-3xl border border-slate-200 bg-white p-3 shadow-sm transition hover:border-slate-300 hover:shadow-md"
-    >
-      <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-2xl bg-slate-950 text-white shadow-sm">
-        <Sparkles className="h-5 w-5" />
-      </div>
+    <Link href="/control-panel" className="flex items-center gap-3 px-6 py-6">
+      <BrandLogo />
 
       <div className="min-w-0">
-        <div className="truncate text-base font-bold tracking-tight text-slate-950">
-          Outreach CRM
-        </div>
-        <div className="truncate text-xs font-semibold text-slate-500">
-          Google Sheet Aligned
+        <div className="truncate text-[15px] font-semibold text-slate-900">
+          Outreach Intelligence CRM
         </div>
       </div>
     </Link>
   );
 }
 
-function NavLink({
+function SidebarItem({
   item,
-  onClick,
+  pathname,
+  onNavigate,
 }: {
-  item: (typeof navItems)[number];
-  onClick?: () => void;
+  item: NavItem;
+  pathname: string;
+  onNavigate?: () => void;
 }) {
-  const pathname = usePathname();
+  const [open, setOpen] = useState(false);
   const Icon = item.icon || FileText;
-  const active = isActivePath(pathname, item.activePath);
+
+  const selfActive = isActivePath(pathname, item.activePath, item.exact);
+
+  const childActive =
+    item.children?.some((child) =>
+      isActivePath(pathname, child.activePath, child.exact)
+    ) ?? false;
+
+  const active = selfActive || childActive;
+
+  useEffect(() => {
+    if (active) {
+      setOpen(true);
+    }
+  }, [active]);
+
+  if (!item.children?.length) {
+    return (
+      <Link
+        href={item.href}
+        onClick={onNavigate}
+        className={cn(
+          "mx-3 flex items-center gap-3 rounded-xl px-4 py-3 text-[15px] font-medium transition",
+          active
+            ? "bg-blue-50 text-blue-600"
+            : "text-slate-700 hover:bg-slate-100"
+        )}
+      >
+        <Icon className="h-5 w-5 shrink-0" />
+        <span className="truncate">{item.title}</span>
+      </Link>
+    );
+  }
 
   return (
-    <Link
-      href={item.href}
-      onClick={onClick}
-      aria-current={active ? "page" : undefined}
-      className={cn(
-        "group relative flex w-full items-center gap-3 rounded-2xl border px-3 py-3 text-sm font-semibold transition-all",
-        "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-slate-400 focus-visible:ring-offset-2",
-        active
-          ? "!border-slate-200 !bg-white !text-slate-950 shadow-sm"
-          : "!border-transparent !text-slate-600 hover:!border-slate-200 hover:!bg-white hover:!text-slate-950 hover:shadow-sm"
-      )}
-    >
-      {active ? (
-        <span className="absolute left-0 top-1/2 h-7 w-1 -translate-y-1/2 rounded-r-full bg-slate-950" />
-      ) : null}
-
-      <span
+    <div className="mx-3">
+      <div
         className={cn(
-          "flex h-9 w-9 shrink-0 items-center justify-center rounded-xl transition-colors",
+          "flex w-full items-center rounded-xl transition",
           active
-            ? "!bg-slate-950 !text-white [&_svg]:!text-white"
-            : "bg-slate-100 !text-slate-500 group-hover:!bg-slate-950 group-hover:!text-white group-hover:[&_svg]:!text-white"
+            ? "bg-blue-50 text-blue-600"
+            : "text-slate-700 hover:bg-slate-100"
         )}
       >
-        <Icon className="h-4 w-4" />
-      </span>
+        <Link
+          href={item.href}
+          onClick={onNavigate}
+          className="flex min-w-0 flex-1 items-center gap-3 px-4 py-3 text-[15px] font-medium"
+        >
+          <Icon className="h-5 w-5 shrink-0" />
+          <span className="min-w-0 flex-1 truncate">{item.title}</span>
+        </Link>
 
-      <span
-        className={cn(
-          "min-w-0 flex-1 truncate",
-          active ? "!text-slate-950" : "!text-inherit"
-        )}
-      >
-        {item.title}
-      </span>
-    </Link>
+        <button
+          type="button"
+          onClick={() => setOpen((prev) => !prev)}
+          aria-label={`Toggle ${item.title}`}
+          className="flex h-full items-center justify-center px-4 py-3"
+        >
+          <ChevronDown
+            className={cn(
+              "h-4 w-4 shrink-0 transition-transform",
+              open && "rotate-180"
+            )}
+          />
+        </button>
+      </div>
+
+      {open ? (
+        <div className="mt-1 space-y-1 pl-4">
+          {item.children.map((child) => {
+            const ChildIcon = child.icon || FileText;
+            const activeChild = isActivePath(
+              pathname,
+              child.activePath,
+              child.exact
+            );
+
+            return (
+              <Link
+                key={child.href}
+                href={child.href}
+                onClick={onNavigate}
+                className={cn(
+                  "flex items-center gap-3 rounded-xl px-4 py-2.5 text-sm transition",
+                  activeChild
+                    ? "bg-blue-50 text-blue-600"
+                    : "text-slate-600 hover:bg-slate-100"
+                )}
+              >
+                <ChildIcon className="h-4 w-4 shrink-0" />
+                <span className="truncate">{child.title}</span>
+              </Link>
+            );
+          })}
+        </div>
+      ) : null}
+    </div>
   );
 }
 
-function SidebarContent({ onNavigate }: { onNavigate?: () => void }) {
+function Sidebar({
+  pathname,
+  onNavigate,
+}: {
+  pathname: string;
+  onNavigate?: () => void;
+}) {
   return (
-    <div className="flex h-full w-full flex-col">
-      <div className="p-4">
-        <SidebarBrand />
-      </div>
+    <div className="flex h-full flex-col bg-white">
+      <SidebarBrand />
 
-      <nav className="clean-scrollbar flex flex-1 flex-col gap-2 overflow-y-auto px-4 pb-4">
+      <div className="flex-1 space-y-1 overflow-y-auto pb-4">
         {navItems.map((item) => (
-          <NavLink key={item.href} item={item} onClick={onNavigate} />
+          <SidebarItem
+            key={item.href}
+            item={item}
+            pathname={pathname}
+            onNavigate={onNavigate}
+          />
         ))}
-      </nav>
-
-      <div className="p-4">
-        <div className="rounded-3xl border border-slate-200 bg-white p-4 shadow-sm">
-          <div className="flex items-center gap-2">
-            <span className="h-2.5 w-2.5 shrink-0 rounded-full bg-emerald-500" />
-            <span className="truncate text-sm font-bold text-slate-950">
-              Local worker mode
-            </span>
-          </div>
-
-          <p className="mt-2 text-xs leading-5 text-slate-500">
-            Sheet tabs are mapped to CRM pages.
-          </p>
-        </div>
       </div>
     </div>
   );
@@ -225,25 +311,18 @@ export function AppShell({ children }: { children: ReactNode }) {
   }, [open]);
 
   return (
-    <div className="min-h-screen w-full overflow-x-hidden bg-slate-50 text-slate-950">
-      <aside className="fixed inset-y-0 left-0 z-40 hidden w-72 border-r border-slate-200 bg-slate-100/80 backdrop-blur-xl xl:block">
-        <SidebarContent />
+    <div className="min-h-screen bg-[#f6f7fb] text-slate-900">
+      <aside className="fixed inset-y-0 left-0 hidden w-[260px] border-r border-slate-200 bg-white lg:block">
+        <Sidebar pathname={pathname} />
       </aside>
 
-      <header className="sticky top-0 z-30 w-full border-b border-slate-200 bg-white/90 backdrop-blur-xl xl:hidden">
-        <div className="flex items-center justify-between gap-3 px-4 py-3 sm:px-5">
-          <Link href="/" className="flex min-w-0 items-center gap-3">
-            <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-2xl bg-slate-950 text-white shadow-sm">
-              <Sparkles className="h-4 w-4" />
-            </div>
+      <div className="border-b border-slate-200 bg-white px-4 py-3 lg:hidden">
+        <div className="flex items-center justify-between">
+          <Link href="/control-panel" className="flex items-center gap-3">
+            <BrandLogo />
 
-            <div className="min-w-0">
-              <div className="truncate text-base font-bold tracking-tight text-slate-950">
-                Outreach CRM
-              </div>
-              <div className="truncate text-xs font-semibold text-slate-500">
-                Google Sheet Aligned
-              </div>
+            <div className="text-[15px] font-semibold text-slate-900">
+              Outreach Intelligence CRM
             </div>
           </Link>
 
@@ -253,32 +332,24 @@ export function AppShell({ children }: { children: ReactNode }) {
             size="icon"
             onClick={() => setOpen(true)}
             aria-label="Open menu"
-            className="shrink-0"
           >
-            <Menu className="h-4 w-4" />
+            <Menu className="h-5 w-5" />
           </Button>
         </div>
-      </header>
+      </div>
 
       {open ? (
-        <div className="fixed inset-0 z-50 xl:hidden">
+        <div className="fixed inset-0 z-50 lg:hidden">
           <button
             type="button"
-            aria-label="Close menu overlay"
-            className="absolute inset-0 h-full w-full bg-slate-950/40 backdrop-blur-sm"
+            className="absolute inset-0 bg-slate-950/30"
             onClick={() => setOpen(false)}
+            aria-label="Close overlay"
           />
 
-          <aside className="absolute inset-y-0 left-0 flex w-[86vw] max-w-full flex-col border-r border-slate-200 bg-slate-100 shadow-2xl sm:w-80">
-            <div className="flex items-center justify-between border-b border-slate-200 bg-white px-4 py-3">
-              <div className="min-w-0">
-                <div className="truncate text-sm font-bold text-slate-950">
-                  Menu
-                </div>
-                <div className="truncate text-xs font-medium text-slate-500">
-                  Outreach Intelligence CRM
-                </div>
-              </div>
+          <aside className="absolute inset-y-0 left-0 w-[88vw] max-w-[300px] border-r border-slate-200 bg-white shadow-2xl">
+            <div className="flex items-center justify-between border-b border-slate-200 px-4 py-3">
+              <div className="text-sm font-semibold text-slate-900">Menu</div>
 
               <Button
                 type="button"
@@ -291,16 +362,14 @@ export function AppShell({ children }: { children: ReactNode }) {
               </Button>
             </div>
 
-            <SidebarContent onNavigate={() => setOpen(false)} />
+            <Sidebar pathname={pathname} onNavigate={() => setOpen(false)} />
           </aside>
         </div>
       ) : null}
 
-      <div className="w-full xl:pl-72">
-        <main className="w-full px-4 py-4 sm:px-5 sm:py-5 lg:px-8 lg:py-6">
-          {children}
-        </main>
-      </div>
+      <main className="min-h-screen px-4 py-6 sm:px-6 lg:ml-[260px] lg:px-8 lg:py-8">
+        {children}
+      </main>
     </div>
   );
 }

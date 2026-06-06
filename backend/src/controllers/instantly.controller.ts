@@ -174,10 +174,41 @@ async function ensureTemplates() {
   }
 }
 
-function getChannelConfig(channel: string) {
+function getAllowedSenders(channel: string) {
+  if (channel === "Enoylity Technology") {
+    return listValue(
+      process.env.INSTANTLY_ENOYLITY_SENDERS || process.env.ENOYLITY_SENDERS
+    ).map(cleanEmail);
+  }
+
+  if (channel === "MHD Tech") {
+    return listValue(
+      process.env.INSTANTLY_MHD_SENDERS || process.env.MHD_SENDERS
+    ).map(cleanEmail);
+  }
+
+  throw new Error("Invalid channel");
+}
+
+function sanitizeSelectedSenders(channel: string, selectedSenders?: any[]) {
+  const allowedSenders = getAllowedSenders(channel);
+  const allowedSet = new Set(allowedSenders);
+
+  const safeSelectedSenders = Array.isArray(selectedSenders)
+    ? selectedSenders
+        .map(cleanEmail)
+        .filter(Boolean)
+        .filter((email) => allowedSet.has(email))
+    : [];
+
+  return safeSelectedSenders.length > 0 ? safeSelectedSenders : allowedSenders;
+}
+
+function getChannelConfig(channel: string, selectedSenders?: any[]) {
   if (channel === "Enoylity Technology") {
     return {
-      senders: listValue(process.env.INSTANTLY_ENOYLITY_SENDERS || process.env.ENOYLITY_SENDERS),
+      senders: sanitizeSelectedSenders(channel, selectedSenders),
+      allSenders: getAllowedSenders(channel),
       relatedVideo: process.env.ENOYLITY_RELATED_FALLBACK || ENOYLITY_RELATED_FALLBACK,
       brandShort: "Enoylity"
     };
@@ -185,13 +216,35 @@ function getChannelConfig(channel: string) {
 
   if (channel === "MHD Tech") {
     return {
-      senders: listValue(process.env.INSTANTLY_MHD_SENDERS || process.env.MHD_SENDERS),
+      senders: sanitizeSelectedSenders(channel, selectedSenders),
+      allSenders: getAllowedSenders(channel),
       relatedVideo: process.env.MHD_RELATED_FALLBACK || MHD_RELATED_FALLBACK,
       brandShort: "MHD"
     };
   }
 
   throw new Error("Invalid channel");
+}
+
+function getSenderFirstName(email: string) {
+  const local = cleanEmail(email).split("@")[0] || "";
+  const firstPart = local.split(/[._-]+/).filter(Boolean)[0] || "Sender";
+
+  return firstPart.charAt(0).toUpperCase() + firstPart.slice(1).toLowerCase();
+}
+
+function replaceTemplateVariables(template: any, lead: any, senderEmail: string) {
+  const senderFirstName = getSenderFirstName(senderEmail);
+
+  return cleanText(template)
+    .replace(/{{\s*firstName\s*}}/g, cleanText(lead?.firstName))
+    .replace(/{{\s*companyName\s*}}/g, cleanText(lead?.companyName))
+    .replace(/{{\s*productName\s*}}/g, cleanText(lead?.productName))
+    .replace(/{{\s*relatedVideo\s*}}/g, cleanText(lead?.relatedVideo))
+    .replace(/{{\s*competitor1\s*}}/g, cleanText(lead?.competitor1))
+    .replace(/{{\s*competitor2\s*}}/g, cleanText(lead?.competitor2))
+    .replace(/{{\s*sendingAccountFirstName\s*}}/g, senderFirstName)
+    .replace(/{{\s*sendingAccountEmail\s*}}/g, cleanEmail(senderEmail));
 }
 
 function titleCase(value: string) {
@@ -494,8 +547,9 @@ function buildCampaignPayload(input: {
   endTime: string;
   dailyLimit: number;
   template: any;
+  selectedSenders?: any[];
 }) {
-  const cfg = getChannelConfig(input.channel);
+  const cfg = getChannelConfig(input.channel, input.selectedSenders);
   const timezone =
     process.env.INSTANTLY_DEFAULT_TIMEZONE ||
     process.env.DEFAULT_TIMEZONE ||
@@ -670,6 +724,7 @@ async function createAndPushCampaign(input: {
   startTime: string;
   endTime: string;
   dailyLimit: number;
+  selectedSenders?: any[];
   usedEmails?: Record<string, boolean>;
 }) {
   await ensureTemplates();
@@ -713,6 +768,10 @@ async function createAndPushCampaign(input: {
     ...input,
     template
   });
+
+  const campaignSenders = Array.isArray(payload.email_list)
+    ? payload.email_list
+    : [];
 
   const createResp = await instantlyApiCall("POST", "/campaigns", payload);
   const campaignId = String(createResp.id || "");
@@ -784,6 +843,7 @@ async function createAndPushCampaign(input: {
     dailyLimit: input.dailyLimit,
     leadsPushed: totalPushed,
     validLeadsFound: leadsToPush.length,
+    selectedSenders: campaignSenders,
     status: activatedAt ? "activated" : "created",
     pushedAt,
     activatedAt,
@@ -802,7 +862,8 @@ async function createAndPushCampaign(input: {
     status: "Success",
     message: totalPushed + ' leads pushed to "' + input.campaignName + '"',
     raw: {
-      leads: leadsToPush.map((lead) => lead.email)
+      leads: leadsToPush.map((lead) => lead.email),
+      selectedSenders: campaignSenders
     }
   });
 
@@ -1114,6 +1175,121 @@ export async function saveTemplate(req: Request, res: Response) {
   }
 }
 
+export async function getSenders(req: Request, res: Response) {
+  try {
+    const channel = cleanText(req.query.channel || "Enoylity Technology");
+    const cfg = getChannelConfig(channel);
+
+    res.json({
+      success: true,
+      count: cfg.allSenders.length,
+      data: cfg.allSenders,
+      senders: cfg.allSenders
+    });
+  } catch (error: any) {
+    res.status(500).json({
+      success: false,
+      message: error.message || "Failed to load sender emails"
+    });
+  }
+}
+
+export async function getImportedLeads(req: Request, res: Response) {
+  try {
+    const channel = cleanText(req.query.channel || "Enoylity Technology");
+    const limit = Math.min(Number(req.query.limit || 20), 200);
+
+    const rows = await InstantlyLeadModel.find({ channel })
+      .sort({ createdAt: -1 })
+      .limit(limit);
+
+    res.json({
+      success: true,
+      count: rows.length,
+      data: rows,
+      leads: rows
+    });
+  } catch (error: any) {
+    res.status(500).json({
+      success: false,
+      message: error.message || "Failed to load imported leads"
+    });
+  }
+}
+
+export async function getTemplatePreview(req: Request, res: Response) {
+  try {
+    await ensureTemplates();
+
+    const channel = cleanText(req.query.channel || "Enoylity Technology");
+    const leadId = cleanText(req.query.leadId);
+    const email = cleanEmail(req.query.email);
+
+    const cfg = getChannelConfig(channel);
+    const senderEmail = cfg.senders[0] || cfg.allSenders?.[0] || "";
+
+    const template = await InstantlyTemplateModel.findOne({ channel });
+
+    const requestedLeadQuery: any = { channel };
+
+    if (leadId && /^[a-f0-9]{24}$/i.test(leadId)) {
+      requestedLeadQuery._id = leadId;
+    } else if (email) {
+      requestedLeadQuery.email = email;
+    }
+
+    let lead = null;
+
+    if (requestedLeadQuery._id || requestedLeadQuery.email) {
+      lead = await InstantlyLeadModel.findOne(requestedLeadQuery);
+    }
+
+    if (!lead && email) {
+      lead = await InstantlyLeadModel.findOne({
+        channel,
+        email
+      });
+    }
+
+    if (!lead && !leadId && !email) {
+      lead = await InstantlyLeadModel.findOne({
+        channel,
+        email: { $exists: true, $nin: ["", null] },
+        pushedStatus: { $in: ["", null] },
+        instantlyBounced: { $in: ["", null] }
+      }).sort({ createdAt: -1 });
+    }
+
+    if (!template || !lead) {
+      return res.json({
+        success: true,
+        data: null,
+        preview: null,
+        message: leadId || email ? "Selected lead preview not found." : "No lead/template found."
+      });
+    }
+
+    const preview = {
+      lead,
+      subject: replaceTemplateVariables(template.subject, lead, senderEmail),
+      body: replaceTemplateVariables(template.body, lead, senderEmail),
+      followUp1: replaceTemplateVariables(template.followUp1, lead, senderEmail),
+      followUp2: replaceTemplateVariables(template.followUp2, lead, senderEmail)
+    };
+
+    return res.json({
+      success: true,
+      data: preview,
+      preview
+    });
+  } catch (error: any) {
+    return res.status(500).json({
+      success: false,
+      message: error.message || "Failed to load template preview"
+    });
+  }
+}
+
 export async function fillCompetitors(req: Request, res: Response) {
   try {
     const companyFilter = cleanText(req.body?.companyName);
@@ -1206,6 +1382,9 @@ export async function pushToInstantly(req: Request, res: Response) {
     const dailyLimit = Number(
       req.body.dailyLimit || process.env.INSTANTLY_DEFAULT_DAILY_LIMIT || 160
     );
+    const selectedSenders = Array.isArray(req.body.selectedSenders)
+      ? req.body.selectedSenders
+      : [];
 
     if (
       !channel ||
@@ -1231,7 +1410,8 @@ export async function pushToInstantly(req: Request, res: Response) {
       endDate,
       startTime,
       endTime,
-      dailyLimit
+      dailyLimit,
+      selectedSenders
     });
 
     res.json({
@@ -1281,7 +1461,11 @@ export async function batchPushCampaigns(req: Request, res: Response) {
       });
     }
 
-    const cfg = getChannelConfig(channel);
+    const selectedSenders = Array.isArray(req.body.selectedSenders)
+      ? req.body.selectedSenders
+      : [];
+
+    const cfg = getChannelConfig(channel, selectedSenders);
     const dates = weekdayDates(startDate, numWeekdays);
     const usedEmails: Record<string, boolean> = {};
 
@@ -1303,6 +1487,7 @@ export async function batchPushCampaigns(req: Request, res: Response) {
         startTime,
         endTime,
         dailyLimit,
+        selectedSenders,
         usedEmails
       });
 

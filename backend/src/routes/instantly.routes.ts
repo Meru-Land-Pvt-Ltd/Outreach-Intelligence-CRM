@@ -4,9 +4,12 @@ import {
   exportInstantlyLeads,
   fillCompetitors,
   getBounceEvents,
+  getImportedLeads,
   getInstantlyCampaigns,
   getInstantlyLeads,
   getPushLogs,
+  getSenders,
+  getTemplatePreview,
   getTemplates,
   instantlyWebhook,
   pullBouncedFromInstantly,
@@ -17,6 +20,9 @@ import {
 const router = Router();
 
 router.get("/leads", getInstantlyLeads);
+router.get("/senders", getSenders);
+router.get("/imported-leads", getImportedLeads);
+router.get("/template-preview", getTemplatePreview);
 router.post("/export", exportInstantlyLeads);
 
 router.get("/templates", getTemplates);

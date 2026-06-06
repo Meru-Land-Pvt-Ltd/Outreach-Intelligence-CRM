@@ -2,36 +2,51 @@ import mongoose from "mongoose";
 
 const JobLogSchema = new mongoose.Schema(
   {
-    jobId: {
-      type: String,
-      required: true
-    },
+    jobId: String,
+
     seedBrandId: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "SeedBrand"
     },
+
     type: {
       type: String,
-      required: true
+      default: "intelligence"
     },
+
+    brandName: String,
+    influencerHandle: String,
+
     status: {
       type: String,
-      enum: ["queued", "running", "completed", "failed"],
       default: "queued"
     },
-    currentStep: {
-      type: String
-    },
+
+    currentStep: String,
+
     progress: {
       type: Number,
       default: 0
     },
-    error: {
-      type: String
-    }
+
+    totalFound: {
+      type: Number,
+      default: 0
+    },
+
+    message: String,
+    error: String,
+    result: Object,
+    raw: Object,
+
+    startedAt: Date,
+    completedAt: Date
   },
-  { timestamps: true }
+  {
+    timestamps: true,
+    strict: false
+  }
 );
 
-export const JobLog =
+export const JobLog: any =
   mongoose.models.JobLog || mongoose.model("JobLog", JobLogSchema);
