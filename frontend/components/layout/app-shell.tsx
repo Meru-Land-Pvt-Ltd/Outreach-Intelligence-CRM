@@ -92,14 +92,14 @@ const navItems: NavItem[] = [
       },
       {
         title: "Enoylity Template",
-        href: "/instantly-campaigns/templates/enoylity",
-        activePath: "/instantly-campaigns/templates/enoylity",
+        href: "/instantly-campaigns/template/enoylity",
+        activePath: "/instantly-campaigns/template/enoylity",
         icon: FileText,
       },
       {
         title: "MHD Template",
-        href: "/instantly-campaigns/templates/mhd",
-        activePath: "/instantly-campaigns/templates/mhd",
+        href: "/instantly-campaigns/template/mhd",
+        activePath: "/instantly-campaigns/template/mhd",
         icon: FileText,
       },
       {
