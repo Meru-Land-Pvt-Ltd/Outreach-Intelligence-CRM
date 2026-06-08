@@ -150,13 +150,31 @@ function BrandLogoMark({ className }: { className?: string }) {
   );
 }
 
+function BrandLine({ side }: { side: "left" | "right" }) {
+  return (
+    <span
+      className={cn(
+        "h-[5px] flex-1 rounded-full opacity-90",
+        side === "left"
+          ? "bg-gradient-to-r from-transparent via-[#0d4de8]/55 to-[#0d4de8] [clip-path:polygon(0_46%,100%_16%,100%_84%,0_54%)]"
+          : "bg-gradient-to-l from-transparent via-[#0d4de8]/55 to-[#0d4de8] [clip-path:polygon(0_16%,100%_46%,100%_54%,0_84%)]"
+      )}
+    />
+  );
+}
+
 function BrandWordmark({ compact = false }: { compact?: boolean }) {
   return (
-    <div className={cn("leading-none", compact ? "w-[150px]" : "w-[145px]")}>
+    <div
+      className={cn(
+        "shrink-0 text-center leading-none",
+        compact ? "w-[156px]" : "w-[140px]"
+      )}
+    >
       <div
         className={cn(
-          "font-black tracking-tight text-[#061761]",
-          compact ? "text-[24px]" : "text-[23px]"
+          "w-full whitespace-nowrap font-black tracking-[-0.06em] text-[#061761]",
+          compact ? "text-[32px]" : "text-[28px]"
         )}
       >
         Outreach
@@ -164,26 +182,26 @@ function BrandWordmark({ compact = false }: { compact?: boolean }) {
 
       <div
         className={cn(
-          "font-light tracking-tight text-[#0d4de8]",
-          compact ? "mt-1 text-[24px]" : "mt-1 text-[22px]"
+          "mt-1 w-full whitespace-nowrap font-light tracking-[-0.08em] text-[#0d4de8]",
+          compact ? "text-[24px]" : "text-[21px]"
         )}
       >
         Intelligence
       </div>
 
-      <div className="mt-2 flex items-center justify-center gap-2">
-        <span className="h-px flex-1 bg-[#0d4de8]" />
+      <div className="mx-auto mt-2 flex w-full items-center justify-center gap-2">
+        <BrandLine side="left" />
 
         <span
           className={cn(
-            "font-bold tracking-[0.35em] text-[#0d4de8]",
+            "shrink-0 whitespace-nowrap pl-[0.36em] font-bold tracking-[0.36em] text-[#0d4de8]",
             compact ? "text-[15px]" : "text-[14px]"
           )}
         >
           CRM
         </span>
 
-        <span className="h-px flex-1 bg-[#0d4de8]" />
+        <BrandLine side="right" />
       </div>
     </div>
   );
