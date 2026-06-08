@@ -16,13 +16,21 @@ import { ThumbnailPreview } from "@/components/shared/thumbnail-preview";
 type ReviewVideoRow = {
   _id?: string;
   videoTitle?: string;
+  title?: string;
   videoUrl?: string;
   thumbnailUrl?: string;
+  thumbnail?: string;
   publishedDate?: string;
+  publishedAt?: string;
   views?: number;
+  viewCount?: number;
   likes?: number;
+  likeCount?: number;
   comments?: number;
+  commentCount?: number;
+  engagement?: number | string;
   engagementRate?: number | string;
+  engagementRatePercent?: number | string;
   duration?: string;
   niche?: string;
   createdAt?: string;
@@ -74,7 +82,9 @@ function getSearchText(row: ReviewVideoRow) {
     row.views,
     row.likes,
     row.comments,
+    row.engagement,
     row.engagementRate,
+    row.engagementRatePercent,
     row.duration,
     row.niche,
   ]
@@ -83,10 +93,25 @@ function getSearchText(row: ReviewVideoRow) {
     .toLowerCase();
 }
 
-function getEngagement(value?: number | string) {
-  if (value === null || value === undefined || value === "") return "-";
+function getEngagement(row: ReviewVideoRow) {
+  const value =
+    row.engagement ??
+    row.engagementRate ??
+    row.engagementRatePercent;
 
-  return `${value}%`;
+  const text = clean(value);
+
+  if (!text || text === "-") return "-";
+
+  if (text.endsWith("%")) return text;
+
+  const numberValue = Number(text);
+
+  if (Number.isFinite(numberValue)) {
+    return `${numberValue}%`;
+  }
+
+  return text;
 }
 
 export function ReviewsTable({
@@ -197,7 +222,10 @@ export function ReviewsTable({
         header: "Thumbnail",
         widthClassName: "min-w-[220px]",
         render: (row) => (
-          <ThumbnailPreview src={row.thumbnailUrl} title={row.videoTitle} />
+          <ThumbnailPreview
+            src={row.thumbnailUrl || row.thumbnail}
+            title={row.videoTitle || row.title}
+          />
         ),
       },
       {
@@ -211,21 +239,21 @@ export function ReviewsTable({
         header: "Views",
         align: "right",
         widthClassName: "min-w-[120px]",
-        render: (row) => formatNumber(row.views),
+        render: (row) => formatNumber(row.views ?? row.viewCount),
       },
       {
         id: "likes",
         header: "Likes",
         align: "right",
         widthClassName: "min-w-[120px]",
-        render: (row) => formatNumber(row.likes),
+        render: (row) => formatNumber(row.likes ?? row.likeCount),
       },
       {
         id: "comments",
         header: "Comments",
         align: "right",
         widthClassName: "min-w-[130px]",
-        render: (row) => formatNumber(row.comments),
+        render: (row) => formatNumber(row.comments ?? row.commentCount),
       },
       {
         id: "engagementRate",
@@ -234,7 +262,7 @@ export function ReviewsTable({
         widthClassName: "min-w-[140px]",
         render: (row) => (
           <span className="font-semibold text-slate-700">
-            {getEngagement(row.engagementRate)}
+            {getEngagement(row)}
           </span>
         ),
       },
