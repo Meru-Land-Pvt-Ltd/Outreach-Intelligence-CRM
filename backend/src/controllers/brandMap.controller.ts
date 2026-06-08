@@ -195,7 +195,7 @@ async function rebuildBrandMapForSeed(seedBrandId: string) {
 export async function getBrandMap(req: Request, res: Response) {
   try {
     const seedBrandId = req.query.seedBrandId as string | undefined;
-    const limit = Number(req.query.limit || 100);
+    const limitParam = String(req.query.limit || "").trim().toLowerCase();
 
     const filter: Record<string, any> = {};
 
@@ -203,9 +203,24 @@ export async function getBrandMap(req: Request, res: Response) {
       filter.seedBrandId = seedBrandId;
     }
 
-    const brands = await BrandMap.find(filter)
-      .sort({ latestSponsorshipDate: -1, createdAt: -1 })
-      .limit(limit);
+    const query = BrandMap.find(filter)
+      .sort({
+        mostRecentSponsorshipDate: -1,
+        latestSponsorshipDate: -1,
+        updatedAt: -1,
+        createdAt: -1
+      })
+      .lean();
+
+    if (limitParam && limitParam !== "max" && limitParam !== "all") {
+      const limit = Number(limitParam);
+
+      if (Number.isFinite(limit) && limit > 0) {
+        query.limit(limit);
+      }
+    }
+
+    const brands = await query;
 
     res.json({
       success: true,
