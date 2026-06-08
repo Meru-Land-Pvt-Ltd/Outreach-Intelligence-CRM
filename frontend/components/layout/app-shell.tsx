@@ -9,14 +9,15 @@ import {
   Building2,
   ChevronDown,
   ChevronsLeft,
+  ChevronsRight,
   FileText,
   Home,
+  LogOut,
   Menu,
   Megaphone,
   PlayCircle,
   Search,
   ShieldX,
-  Sparkles,
   Workflow,
   X,
   type LucideIcon,
@@ -135,35 +136,115 @@ function isActivePath(pathname: string, activePath: string, exact = false) {
   return pathname === activePath || pathname.startsWith(`${activePath}/`);
 }
 
-function BrandLogo() {
+function SidebarBrand({
+  collapsed,
+  onToggle,
+}: {
+  collapsed: boolean;
+  onToggle?: () => void;
+}) {
+  if (collapsed) {
+    return (
+      <div className="flex items-center justify-center border-b border-slate-100 px-3 py-4">
+        {onToggle ? (
+          <button
+            type="button"
+            onClick={onToggle}
+            aria-label="Expand sidebar"
+            title="Expand sidebar"
+            className="flex h-10 w-10 items-center justify-center rounded-xl border border-slate-200 bg-white text-slate-500 shadow-sm transition hover:bg-slate-100 hover:text-slate-800"
+          >
+            <ChevronsRight className="h-4 w-4" />
+          </button>
+        ) : null}
+      </div>
+    );
+  }
+
   return (
-    <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-blue-600 text-lg font-bold text-white shadow-sm">
-      O
+    <div className="flex items-center justify-between gap-3 border-b border-slate-100 px-4 py-4">
+      <Link
+        href="/control-panel"
+        title="Outreach Intelligence CRM"
+        className="min-w-0 flex-1 rounded-2xl px-2 py-2 transition hover:bg-slate-50"
+      >
+        <div className="whitespace-normal text-[15px] font-black leading-5 text-slate-950">
+          Outreach Intelligence CRM
+        </div>
+
+        <div className="mt-0.5 whitespace-normal text-xs font-semibold leading-4 text-slate-400">
+          Enoylity Media Creations
+        </div>
+      </Link>
+
+      {onToggle ? (
+        <button
+          type="button"
+          onClick={onToggle}
+          aria-label="Collapse sidebar"
+          title="Collapse sidebar"
+          className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl border border-slate-200 bg-white text-slate-500 transition hover:bg-slate-100 hover:text-slate-800"
+        >
+          <ChevronsLeft className="h-4 w-4" />
+        </button>
+      ) : null}
     </div>
   );
 }
 
-function SidebarBrand() {
-  return (
-    <Link href="/control-panel" className="flex items-center gap-3 px-6 py-6">
-      <BrandLogo />
+function clearBrowserCookies() {
+  if (typeof document === "undefined" || typeof window === "undefined") return;
 
-      <div className="min-w-0">
-        <div className="truncate text-[15px] font-semibold text-slate-900">
-          Outreach Intelligence CRM
-        </div>
-      </div>
-    </Link>
+  const cookieList = document.cookie.split(";").filter(Boolean);
+  const hostname = window.location.hostname;
+  const hostnameParts = hostname.split(".");
+  const baseDomain =
+    hostnameParts.length >= 2 ? hostnameParts.slice(-2).join(".") : hostname;
+
+  const domains = Array.from(
+    new Set(["", hostname, `.${hostname}`, `.${baseDomain}`])
   );
+
+  const paths = Array.from(new Set(["/", window.location.pathname || "/"]));
+
+  for (const cookie of cookieList) {
+    const name = cookie.split("=")[0]?.trim();
+
+    if (!name) continue;
+
+    for (const domain of domains) {
+      for (const path of paths) {
+        document.cookie = `${name}=; expires=Thu, 01 Jan 1970 00:00:00 GMT; Max-Age=0; path=${path}${
+          domain ? `; domain=${domain}` : ""
+        }`;
+      }
+    }
+  }
+}
+
+function logoutUser() {
+  try {
+    localStorage.clear();
+  } catch {}
+
+  try {
+    sessionStorage.clear();
+  } catch {}
+
+  clearBrowserCookies();
+
+  window.location.replace("/login");
 }
 
 function SidebarItem({
   item,
   pathname,
+  collapsed,
   onNavigate,
 }: {
   item: NavItem;
   pathname: string;
+  collapsed: boolean;
   onNavigate?: () => void;
 }) {
   const [open, setOpen] = useState(false);
@@ -179,25 +260,32 @@ function SidebarItem({
   const active = selfActive || childActive;
 
   useEffect(() => {
-    if (active) {
+    if (active && !collapsed) {
       setOpen(true);
     }
-  }, [active]);
 
-  if (!item.children?.length) {
+    if (collapsed) {
+      setOpen(false);
+    }
+  }, [active, collapsed]);
+
+  if (!item.children?.length || collapsed) {
     return (
       <Link
         href={item.href}
         onClick={onNavigate}
+        title={item.title}
         className={cn(
-          "mx-3 flex items-center gap-3 rounded-xl px-4 py-3 text-[15px] font-medium transition",
+          "mx-3 flex items-center rounded-xl text-[15px] font-medium transition",
+          collapsed ? "justify-center px-0 py-3" : "gap-3 px-4 py-3",
           active
             ? "bg-blue-50 text-blue-600"
             : "text-slate-700 hover:bg-slate-100"
         )}
       >
         <Icon className="h-5 w-5 shrink-0" />
-        <span className="truncate">{item.title}</span>
+
+        {!collapsed ? <span className="truncate">{item.title}</span> : null}
       </Link>
     );
   }
@@ -269,27 +357,68 @@ function SidebarItem({
   );
 }
 
+function SidebarLogout({
+  collapsed,
+  onNavigate,
+}: {
+  collapsed: boolean;
+  onNavigate?: () => void;
+}) {
+  function handleLogout() {
+    onNavigate?.();
+    logoutUser();
+  }
+
+  return (
+    <div className="border-t border-slate-200 px-3 py-4">
+      <button
+        type="button"
+        onClick={handleLogout}
+        title="Logout"
+        className={cn(
+          "flex w-full items-center rounded-xl text-left text-[15px] font-semibold text-red-600 transition hover:bg-red-50 hover:text-red-700",
+          collapsed ? "justify-center px-0 py-3" : "gap-3 px-4 py-3"
+        )}
+      >
+        <LogOut className="h-5 w-5 shrink-0" />
+        {!collapsed ? <span>Logout</span> : null}
+      </button>
+    </div>
+  );
+}
+
 function Sidebar({
   pathname,
+  collapsed,
+  showBrand = true,
+  onToggleCollapse,
   onNavigate,
 }: {
   pathname: string;
+  collapsed: boolean;
+  showBrand?: boolean;
+  onToggleCollapse?: () => void;
   onNavigate?: () => void;
 }) {
   return (
-    <div className="flex h-full flex-col bg-white">
-      <SidebarBrand />
+    <div className="relative flex h-full flex-col bg-white">
+      {showBrand ? (
+        <SidebarBrand collapsed={collapsed} onToggle={onToggleCollapse} />
+      ) : null}
 
-      <div className="flex-1 space-y-1 overflow-y-auto pb-4">
+      <div className="flex-1 space-y-1 overflow-y-auto py-4">
         {navItems.map((item) => (
           <SidebarItem
             key={item.href}
             item={item}
             pathname={pathname}
+            collapsed={collapsed}
             onNavigate={onNavigate}
           />
         ))}
       </div>
+
+      <SidebarLogout collapsed={collapsed} onNavigate={onNavigate} />
     </div>
   );
 }
@@ -297,6 +426,26 @@ function Sidebar({
 export function AppShell({ children }: { children: ReactNode }) {
   const pathname = usePathname();
   const [open, setOpen] = useState(false);
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+
+  useEffect(() => {
+    try {
+      const saved = localStorage.getItem("outreach-sidebar-collapsed");
+      setSidebarCollapsed(saved === "true");
+    } catch {}
+  }, []);
+
+  function toggleSidebarCollapsed() {
+    setSidebarCollapsed((current) => {
+      const next = !current;
+
+      try {
+        localStorage.setItem("outreach-sidebar-collapsed", String(next));
+      } catch {}
+
+      return next;
+    });
+  }
 
   useEffect(() => {
     setOpen(false);
@@ -312,17 +461,28 @@ export function AppShell({ children }: { children: ReactNode }) {
 
   return (
     <div className="min-h-screen bg-[#f6f7fb] text-slate-900">
-      <aside className="fixed inset-y-0 left-0 hidden w-[260px] border-r border-slate-200 bg-white lg:block">
-        <Sidebar pathname={pathname} />
+      <aside
+        className={cn(
+          "fixed inset-y-0 left-0 z-30 hidden border-r border-slate-200 bg-white transition-all duration-300 lg:block",
+          sidebarCollapsed ? "w-[84px]" : "w-[280px]"
+        )}
+      >
+        <Sidebar
+          pathname={pathname}
+          collapsed={sidebarCollapsed}
+          onToggleCollapse={toggleSidebarCollapsed}
+        />
       </aside>
 
       <div className="border-b border-slate-200 bg-white px-4 py-3 lg:hidden">
         <div className="flex items-center justify-between">
-          <Link href="/control-panel" className="flex items-center gap-3">
-            <BrandLogo />
-
-            <div className="text-[15px] font-semibold text-slate-900">
+          <Link href="/control-panel" className="min-w-0">
+            <div className="text-[15px] font-black leading-5 text-slate-950">
               Outreach Intelligence CRM
+            </div>
+
+            <div className="text-xs font-semibold leading-4 text-slate-400">
+              Enoylity Media Creations
             </div>
           </Link>
 
@@ -347,9 +507,17 @@ export function AppShell({ children }: { children: ReactNode }) {
             aria-label="Close overlay"
           />
 
-          <aside className="absolute inset-y-0 left-0 w-[88vw] max-w-[300px] border-r border-slate-200 bg-white shadow-2xl">
+          <aside className="absolute inset-y-0 left-0 w-[88vw] max-w-[320px] border-r border-slate-200 bg-white shadow-2xl">
             <div className="flex items-center justify-between border-b border-slate-200 px-4 py-3">
-              <div className="text-sm font-semibold text-slate-900">Menu</div>
+              <div className="min-w-0">
+                <div className="text-sm font-black leading-5 text-slate-950">
+                  Outreach Intelligence CRM
+                </div>
+
+                <div className="text-xs font-semibold text-slate-400">
+                  Enoylity Media Creations
+                </div>
+              </div>
 
               <Button
                 type="button"
@@ -362,12 +530,22 @@ export function AppShell({ children }: { children: ReactNode }) {
               </Button>
             </div>
 
-            <Sidebar pathname={pathname} onNavigate={() => setOpen(false)} />
+            <Sidebar
+              pathname={pathname}
+              collapsed={false}
+              showBrand={false}
+              onNavigate={() => setOpen(false)}
+            />
           </aside>
         </div>
       ) : null}
 
-      <main className="min-h-screen px-4 py-6 sm:px-6 lg:ml-[260px] lg:px-8 lg:py-8">
+      <main
+        className={cn(
+          "min-h-screen px-4 py-6 transition-all duration-300 sm:px-6 lg:px-8 lg:py-8",
+          sidebarCollapsed ? "lg:ml-[84px]" : "lg:ml-[280px]"
+        )}
+      >
         {children}
       </main>
     </div>
