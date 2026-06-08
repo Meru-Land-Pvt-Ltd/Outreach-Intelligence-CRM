@@ -20,12 +20,12 @@ const tabs = [
   },
   {
     label: "Enoylity Template",
-    href: "/instantly-campaigns/templates/enoylity",
+    href: "/instantly-campaigns/template/enoylity",
     icon: FileText,
   },
   {
     label: "MHD Template",
-    href: "/instantly-campaigns/templates/mhd",
+    href: "/instantly-campaigns/template/mhd",
     icon: FileText,
   },
   {

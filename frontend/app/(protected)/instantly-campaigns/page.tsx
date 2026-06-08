@@ -687,7 +687,7 @@ export default function InstantlyControlPanelPage() {
       const response = await apiGet(
         `/instantly/imported-leads?channel=${encodeURIComponent(
           channel
-        )}&limit=20`
+        )}&limit=`
       );
 
       setImportedLeads(response?.data || response?.leads || []);

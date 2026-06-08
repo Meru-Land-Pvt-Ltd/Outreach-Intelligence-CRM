@@ -19,6 +19,8 @@ import {
 
 const router = Router();
 
+router.post("/fill-competitors", fillCompetitors);
+
 router.get("/leads", getInstantlyLeads);
 router.get("/senders", getSenders);
 router.get("/imported-leads", getImportedLeads);

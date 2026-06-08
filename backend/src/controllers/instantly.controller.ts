@@ -538,6 +538,155 @@ async function verifyEmailWithMillionVerifier(email: string) {
   return { status: "Unknown", raw: data };
 }
 
+function escapeHtmlForInstantly(value: any) {
+  return String(value || "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
+function normalizeLeadStatus(value: any) {
+  return String(value || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[_\s]+/g, "-");
+}
+
+function isVerificationRejected(value: any) {
+  const status = normalizeLeadStatus(value);
+
+  if (!status || status === "-") return false;
+
+  return [
+    "invalid",
+    "bad",
+    "failed",
+    "fail",
+    "rejected",
+    "undeliverable",
+    "do-not-mail",
+    "do-not-send",
+    "spamtrap",
+    "abuse",
+    "disposable"
+  ].includes(status);
+}
+
+function isBounceRejected(value: any) {
+  const status = normalizeLeadStatus(value);
+
+  if (!status || status === "-" || status === "safe") return false;
+
+  return [
+    "yes",
+    "true",
+    "1",
+    "bounced",
+    "bounce",
+    "hard-bounce",
+    "gateway-bounced",
+    "instantly-bounced",
+    "failed",
+    "blocked",
+    "invalid"
+  ].includes(status);
+}
+
+function isAlreadyPushed(value: any) {
+  const status = String(value || "").trim().toLowerCase();
+
+  if (!status || status === "-") return false;
+
+  return status.includes("pushed") ||
+    status === "sent" ||
+    status === "success" ||
+    status === "done" ||
+    status === "yes" ||
+    status === "true";
+}
+
+function isEligibleForInstantlyPush(lead: any) {
+  const email = cleanEmail(lead?.email);
+
+  if (!email || !email.includes("@")) return false;
+  if (isAlreadyPushed(lead?.pushedStatus)) return false;
+  if (isVerificationRejected(lead?.verificationStatus)) return false;
+  if (isBounceRejected(lead?.instantlyBounced)) return false;
+  if (isBounceRejected(lead?.gatewayBounced)) return false;
+
+  return true;
+}
+
+
+function toInstantlyHtml(value: any) {
+  const normalized = String(value || "")
+    .replace(/\\r\\n/g, "\n")
+    .replace(/\\n/g, "\n")
+    .replace(/\r\n/g, "\n")
+    .replace(/\r/g, "\n")
+    .replace(/<br\s*\/?>/gi, "\n")
+    .replace(/<\/p>/gi, "\n")
+    .replace(/<\/div>/gi, "\n")
+    .replace(/<[^>]+>/g, "")
+    .split("\n")
+    .map((line) => line.replace(/[ \t]+$/g, ""))
+    .join("\n")
+    .replace(/\n{4,}/g, "\n\n\n")
+    .trim();
+
+  if (!normalized) return "";
+
+  return normalized
+    .split("\n")
+    .map((line) => {
+      const text = line.trim();
+
+      if (!text) {
+        return "<div><br></div>";
+      }
+
+      return `<div>${escapeHtmlForInstantly(line)}</div>`;
+    })
+    .join("");
+}
+
+function getInstantlyTimezone() {
+  return (
+    process.env.INSTANTLY_DEFAULT_TIMEZONE ||
+    process.env.DEFAULT_TIMEZONE ||
+    "Asia/Kolkata"
+  );
+}
+
+function getTodayDateInTimezone(timezone: string) {
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: timezone,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit"
+  }).formatToParts(new Date());
+
+  const values: Record<string, string> = {};
+
+  for (const part of parts) {
+    values[part.type] = part.value;
+  }
+
+  return `${values.year}-${values.month}-${values.day}`;
+}
+
+function getCampaignLaunchStatus(startDate: string) {
+  const date = cleanText(startDate);
+  const today = getTodayDateInTimezone(getInstantlyTimezone());
+
+  if (!date) return "launched";
+
+  return date <= today ? "launched" : "scheduled";
+}
+
+
 function buildCampaignPayload(input: {
   channel: string;
   campaignName: string;
@@ -550,10 +699,7 @@ function buildCampaignPayload(input: {
   selectedSenders?: any[];
 }) {
   const cfg = getChannelConfig(input.channel, input.selectedSenders);
-  const timezone =
-    process.env.INSTANTLY_DEFAULT_TIMEZONE ||
-    process.env.DEFAULT_TIMEZONE ||
-    "Asia/Kolkata";
+  const timezone = getInstantlyTimezone();
 
   return {
     name: input.campaignName,
@@ -590,7 +736,7 @@ function buildCampaignPayload(input: {
             variants: [
               {
                 subject: input.template.subject,
-                body: input.template.body
+                body: toInstantlyHtml(input.template.body)
               }
             ]
           },
@@ -601,7 +747,7 @@ function buildCampaignPayload(input: {
             variants: [
               {
                 subject: "",
-                body: input.template.followUp1
+                body: toInstantlyHtml(input.template.followUp1)
               }
             ]
           },
@@ -612,7 +758,7 @@ function buildCampaignPayload(input: {
             variants: [
               {
                 subject: "",
-                body: input.template.followUp2
+                body: toInstantlyHtml(input.template.followUp2)
               }
             ]
           }
@@ -677,7 +823,7 @@ async function getEligibleLeads(input: {
       await new Promise((resolve) => setTimeout(resolve, 150));
     }
 
-    if (verificationStatus !== "Ok") {
+    if (isVerificationRejected(verificationStatus)) {
       continue;
     }
 
@@ -700,7 +846,11 @@ async function getEligibleLeads(input: {
       });
     }
 
-    if (gatewayStatus !== "Safe") {
+    if (isBounceRejected(gatewayStatus)) {
+      continue;
+    }
+
+    if (!isEligibleForInstantlyPush(row)) {
       continue;
     }
 
@@ -764,6 +914,28 @@ async function createAndPushCampaign(input: {
     throw new Error("No valid eligible leads found after verification and gateway check.");
   }
 
+  const competitorFillBeforePush = await fillCompetitorsForCompanies(
+    leadsToPush.map((lead) => lead.companyName)
+  );
+
+  if (competitorFillBeforePush.updated > 0) {
+    const refreshedLeads = await InstantlyLeadModel.find({
+      _id: { $in: leadIds }
+    }).lean();
+
+    const refreshedById = new Map(
+      refreshedLeads.map((lead: any) => [String(lead._id), lead])
+    );
+
+    for (let index = 0; index < leadsToPush.length; index += 1) {
+      const refreshedLead = refreshedById.get(String(leadIds[index]));
+
+      if (refreshedLead) {
+        leadsToPush[index] = refreshedLead;
+      }
+    }
+  }
+
   const payload = buildCampaignPayload({
     ...input,
     template
@@ -825,12 +997,12 @@ async function createAndPushCampaign(input: {
     await new Promise((resolve) => setTimeout(resolve, 300));
   }
 
+  const campaignLaunchStatus = getCampaignLaunchStatus(input.startDate);
+
   let activatedAt: Date | undefined;
 
-  if (envBool(process.env.INSTANTLY_AUTO_ACTIVATE, false)) {
-    await instantlyApiCall("POST", "/campaigns/" + campaignId + "/activate", {});
-    activatedAt = new Date();
-  }
+  await instantlyApiCall("POST", "/campaigns/" + campaignId + "/activate", {});
+  activatedAt = new Date();
 
   await InstantlyCampaignModel.create({
     channel: input.channel,
@@ -844,7 +1016,7 @@ async function createAndPushCampaign(input: {
     leadsPushed: totalPushed,
     validLeadsFound: leadsToPush.length,
     selectedSenders: campaignSenders,
-    status: activatedAt ? "activated" : "created",
+    status: activatedAt ? campaignLaunchStatus : "created",
     pushedAt,
     activatedAt,
     raw: {
@@ -952,6 +1124,93 @@ async function askOpenAIForCompetitors(companyName: string) {
   }
 }
 
+async function fillCompetitorsForCompanies(companyNames: string[]) {
+  const uniqueCompanies = Array.from(
+    new Set(
+      companyNames
+        .map((name) => cleanText(name))
+        .filter(Boolean)
+    )
+  );
+
+  let updated = 0;
+  const results: any[] = [];
+
+  for (const companyName of uniqueCompanies) {
+    const needsUpdate = await InstantlyLeadModel.countDocuments({
+      companyName,
+      $or: [
+        { competitor1: { $exists: false } },
+        { competitor1: "" },
+        { competitor1: null },
+        { competitor1: "-" },
+        { competitor2: { $exists: false } },
+        { competitor2: "" },
+        { competitor2: null },
+        { competitor2: "-" }
+      ]
+    });
+
+    if (!needsUpdate) {
+      continue;
+    }
+
+    const competitors = await askOpenAIForCompetitors(companyName);
+
+    if (!cleanText(competitors.competitor1) && !cleanText(competitors.competitor2)) {
+      results.push({
+        companyName,
+        competitor1: "",
+        competitor2: "",
+        updated: 0,
+        skipped: true
+      });
+
+      continue;
+    }
+
+    const result = await InstantlyLeadModel.updateMany(
+      {
+        companyName,
+        $or: [
+          { competitor1: { $exists: false } },
+          { competitor1: "" },
+          { competitor1: null },
+          { competitor1: "-" },
+          { competitor2: { $exists: false } },
+          { competitor2: "" },
+          { competitor2: null },
+          { competitor2: "-" }
+        ]
+      },
+      {
+        $set: {
+          competitor1: cleanText(competitors.competitor1),
+          competitor2: cleanText(competitors.competitor2)
+        }
+      }
+    );
+
+    updated += result.modifiedCount || 0;
+
+    results.push({
+      companyName,
+      competitor1: competitors.competitor1,
+      competitor2: competitors.competitor2,
+      updated: result.modifiedCount || 0
+    });
+
+    await new Promise((resolve) => setTimeout(resolve, 250));
+  }
+
+  return {
+    companies: uniqueCompanies.length,
+    updated,
+    data: results
+  };
+}
+
+
 function weekdayDates(startDate: string, numWeekdays: number) {
   const dates: Date[] = [];
   const cursor = new Date(startDate + "T00:00:00");
@@ -988,9 +1247,29 @@ export async function getInstantlyLeads(req: Request, res: Response) {
       filter.channel = String(req.query.channel);
     }
 
-    const rows = await InstantlyLeadModel.find(filter)
+    let rows = await InstantlyLeadModel.find(filter)
       .sort({ createdAt: -1 })
       .limit(2000);
+
+    const missingCompetitorCompanies: string[] = Array.from(
+      new Set<string>(
+        (rows as any[])
+          .filter(
+            (row: any) =>
+              !cleanText(row.competitor1) || !cleanText(row.competitor2)
+          )
+          .map((row: any) => cleanText(row.companyName))
+          .filter((companyName: string) => companyName.length > 0)
+      )
+    );
+
+    if (missingCompetitorCompanies.length > 0) {
+      await fillCompetitorsForCompanies(missingCompetitorCompanies);
+
+      rows = await InstantlyLeadModel.find(filter)
+        .sort({ createdAt: -1 })
+        .limit(2000);
+    }
 
     res.json({
       success: true,
@@ -1013,6 +1292,7 @@ export async function exportInstantlyLeads(req: Request, res: Response) {
     let exported = 0;
     let skippedAlreadyExported = 0;
     let contactsNormalized = 0;
+    const companiesForCompetitors = new Set<string>();
 
     const alreadyExportedEmails: Record<string, boolean> = {};
 
@@ -1103,15 +1383,20 @@ export async function exportInstantlyLeads(req: Request, res: Response) {
           });
 
           exported += 1;
+          companiesForCompetitors.add(brandName);
         }
 
         alreadyExportedEmails[email] = true;
       }
     }
 
+    const competitorFill = await fillCompetitorsForCompanies(Array.from(companiesForCompetitors));
+
     res.json({
       success: true,
       exported,
+      competitorsCompanies: competitorFill.companies,
+      competitorsUpdated: competitorFill.updated,
       skippedAlreadyExported,
       contactsNormalized
     });
@@ -1197,7 +1482,7 @@ export async function getSenders(req: Request, res: Response) {
 export async function getImportedLeads(req: Request, res: Response) {
   try {
     const channel = cleanText(req.query.channel || "Enoylity Technology");
-    const limit = Math.min(Number(req.query.limit || 20), 200);
+    const limit = Math.min(Number(req.query.limit || 5), 200);
 
     const rows = await InstantlyLeadModel.find({ channel })
       .sort({ createdAt: -1 })
@@ -1272,9 +1557,9 @@ export async function getTemplatePreview(req: Request, res: Response) {
     const preview = {
       lead,
       subject: replaceTemplateVariables(template.subject, lead, senderEmail),
-      body: replaceTemplateVariables(template.body, lead, senderEmail),
-      followUp1: replaceTemplateVariables(template.followUp1, lead, senderEmail),
-      followUp2: replaceTemplateVariables(template.followUp2, lead, senderEmail)
+      body: toInstantlyHtml(replaceTemplateVariables(template.body, lead, senderEmail)),
+      followUp1: toInstantlyHtml(replaceTemplateVariables(template.followUp1, lead, senderEmail)),
+      followUp2: toInstantlyHtml(replaceTemplateVariables(template.followUp2, lead, senderEmail))
     };
 
     return res.json({

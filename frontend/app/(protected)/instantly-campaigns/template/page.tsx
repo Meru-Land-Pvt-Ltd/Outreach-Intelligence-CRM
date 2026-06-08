@@ -1,5 +1,5 @@
 import { redirect } from "next/navigation";
 
 export default function HomePage() {
-  redirect("/control-panel");
+  redirect("/instantly-campaigns/template/enoylity");
 }
