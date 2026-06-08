@@ -368,15 +368,15 @@ export default function BrandMapPage() {
             onChange={setNiche}
             options={toOptions(nicheOptions)}
           />
+
+          <FilterSelect
+            label="Found Via"
+            value={foundVia}
+            onChange={setFoundVia}
+            options={toOptions(foundViaOptions)}
+          />
         </div>
 
-        <div className="flex flex-wrap items-center justify-between gap-3 text-sm">
-          {hasActiveFilters ? (
-            <span className="rounded-full bg-slate-100 px-3 py-1 text-xs font-semibold text-slate-600">
-              Filters applied
-            </span>
-          ) : null}
-        </div>
       </section>
 
       <AdminTable

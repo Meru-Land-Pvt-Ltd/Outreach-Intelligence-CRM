@@ -854,6 +854,24 @@ async function getEligibleLeads(input: {
       continue;
     }
 
+    gatewayStatus = cleanText(row.gatewayBounced);
+
+    if (!gatewayStatus || gatewayStatus === "-" || gatewayStatus === "Not Checked") {
+      const gatewayDomain = getDomainFromEmail(row.email);
+      gatewayStatus = await checkEmailGateway(gatewayDomain);
+
+      await InstantlyLeadModel.updateOne(
+        { _id: row._id },
+        { $set: { gatewayBounced: gatewayStatus } }
+      );
+
+      row.gatewayBounced = gatewayStatus;
+    }
+
+    if (gatewayStatus !== "Safe") {
+      continue;
+    }
+
     leadsToPush.push(row);
     leadIds.push(row._id);
 
