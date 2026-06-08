@@ -115,14 +115,34 @@ export async function createExcludedBrand(req: Request, res: Response) {
 
 export async function deleteExcludedBrand(req: Request, res: Response) {
   try {
-    await ExcludedBrand.findByIdAndDelete(req.params.id);
+    const { id } = req.params;
+
+    if (!id) {
+      return res.status(400).json({
+        success: false,
+        message: "Excluded brand ID is required",
+      });
+    }
+
+    const deleted = await ExcludedBrand.findByIdAndDelete(id);
+
+    if (!deleted) {
+      return res.status(404).json({
+        success: false,
+        message: "Excluded brand not found",
+      });
+    }
 
     res.json({
       success: true,
-      message: "Excluded brand deleted"
+      message: "Excluded brand deleted",
+      data: deleted,
     });
   } catch (error: any) {
-    res.status(500).json({ success: false, message: error.message });
+    res.status(500).json({
+      success: false,
+      message: error.message || "Failed to delete excluded brand",
+    });
   }
 }
 

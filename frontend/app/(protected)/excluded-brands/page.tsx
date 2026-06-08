@@ -1,8 +1,8 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import { ExternalLink, Plus } from "lucide-react";
-import { apiGet, apiPost } from "@/lib/api";
+import { ExternalLink, Plus, Trash2 } from "lucide-react";
+import { apiDelete, apiGet, apiPost } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Notice } from "@/components/shared/notice";
@@ -95,6 +95,7 @@ export default function ExcludedBrandsPage() {
 
   const [loading, setLoading] = useState(true);
   const [submitting, setSubmitting] = useState(false);
+  const [deletingId, setDeletingId] = useState("");
 
   const [search, setSearch] = useState("");
   const [page, setPage] = useState(1);
@@ -128,10 +129,24 @@ export default function ExcludedBrandsPage() {
   async function submit(e: React.FormEvent<HTMLFormElement>) {
     e.preventDefault();
 
+    const brandName = clean(form.brandName);
+    const domain = clean(form.domain);
+
+    if (!brandName && !domain) {
+      setNotice({
+        type: "error",
+        text: "Please enter brand name or domain.",
+      });
+      return;
+    }
+
     setSubmitting(true);
     setNotice(null);
 
-    const response: any = await apiPost("/sheets/excluded-brands", form);
+    const response: any = await apiPost("/sheets/excluded-brands", {
+      brandName,
+      domain,
+    });
 
     if (response.success) {
       setNotice({ type: "success", text: "Brand excluded." });
@@ -146,6 +161,46 @@ export default function ExcludedBrandsPage() {
 
     setSubmitting(false);
   }
+
+async function deleteRow(row: ExcludedBrandRow) {
+  const id = clean(row._id);
+  const brandName = clean(row.brandName);
+  const domain = clean(row.domain);
+
+  if (!id) {
+    setNotice({
+      type: "error",
+      text: "Missing excluded brand ID. Please refresh and try again.",
+    });
+    return;
+  }
+
+  const confirmed = window.confirm(
+    `Delete excluded brand "${brandName || domain || "this row"}"?`
+  );
+
+  if (!confirmed) return;
+
+  setDeletingId(id);
+  setNotice(null);
+
+  const response: any = await apiDelete(`/sheets/excluded-brands/${id}`);
+
+  if (response.success) {
+    setNotice({ type: "success", text: "Excluded brand deleted." });
+
+    setRows((currentRows) => currentRows.filter((item) => item._id !== id));
+
+    await loadRows();
+  } else {
+    setNotice({
+      type: "error",
+      text: response.message || "Failed to delete excluded brand.",
+    });
+  }
+
+  setDeletingId("");
+}
 
   const filteredRows = useMemo(() => {
     const query = search.trim().toLowerCase();
@@ -190,8 +245,33 @@ export default function ExcludedBrandsPage() {
         widthClassName: "min-w-[260px]",
         render: (row) => <ClickableDomain value={row.domain} />,
       },
+      {
+        id: "actions",
+        header: "Action",
+        align: "right",
+        widthClassName: "min-w-[140px]",
+        render: (row) => {
+          const rowKey =
+            clean(row._id) || `${clean(row.brandName)}-${clean(row.domain)}`;
+          const isDeleting = deletingId === rowKey || deletingId === row._id;
+
+          return (
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              disabled={isDeleting}
+              onClick={() => deleteRow(row)}
+              className="h-9 border-red-200 px-3 text-red-600 hover:bg-red-50 hover:text-red-700"
+            >
+              <Trash2 className="mr-2 h-4 w-4" />
+              {isDeleting ? "Deleting..." : "Delete"}
+            </Button>
+          );
+        },
+      },
     ],
-    []
+    [deletingId]
   );
 
   return (
@@ -209,7 +289,10 @@ export default function ExcludedBrandsPage() {
       {notice ? <Notice type={notice.type} text={notice.text} /> : null}
 
       <section className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
-        <form onSubmit={submit} className="grid gap-3 md:grid-cols-[1fr_1fr_auto] md:items-end">
+        <form
+          onSubmit={submit}
+          className="grid gap-3 md:grid-cols-[1fr_1fr_auto] md:items-end"
+        >
           <label className="space-y-1.5">
             <span className="text-xs font-semibold text-slate-500">
               Brand Name
@@ -217,7 +300,9 @@ export default function ExcludedBrandsPage() {
             <Input
               placeholder="Brand name"
               value={form.brandName}
-              onChange={(e) => setForm({ ...form, brandName: e.target.value })}
+              onChange={(e) =>
+                setForm({ ...form, brandName: e.target.value })
+              }
             />
           </label>
 
@@ -239,7 +324,7 @@ export default function ExcludedBrandsPage() {
         </form>
       </section>
 
-      <section className="space-y-3">
+      <section className="flex flex-col gap-3 lg:flex-row lg:items-end lg:justify-between">
         <div className="w-full lg:max-w-[620px] xl:max-w-[720px]">
           <FilterSearchInput
             label="Search"
@@ -255,6 +340,7 @@ export default function ExcludedBrandsPage() {
             variant="ghost"
             size="sm"
             onClick={() => setSearch("")}
+            className="w-fit"
           >
             Clear search
           </Button>
@@ -264,7 +350,9 @@ export default function ExcludedBrandsPage() {
       <AdminTable
         data={visibleRows}
         columns={columns}
-        rowKey={(row, index) => row._id || `${row.brandName}-${row.domain}-${index}`}
+        rowKey={(row, index) =>
+          row._id || `${row.brandName}-${row.domain}-${index}`
+        }
         loading={loading}
         loadingRows={8}
         emptyTitle={loading ? "Loading exclusions..." : "No exclusions yet."}
