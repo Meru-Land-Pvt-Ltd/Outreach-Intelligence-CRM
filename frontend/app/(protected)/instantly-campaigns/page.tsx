@@ -65,7 +65,7 @@ const FALLBACK_SENDERS: Record<Channel, string[]> = {
     "jeff@enoylitypartner.com",
     "bill@enoylitymedia.com",
     "jacob@enoylitycreator.com",
-    "tom@enoylityconnect.com",
+    "emma@enoylityconnect.com",
   ],
   "MHD Tech": [
     "partnership@mhdtechpro.com",
@@ -75,7 +75,7 @@ const FALLBACK_SENDERS: Record<Channel, string[]> = {
     "olivia@mhdtechreview.com",
     "barack@mhdtechreview.com",
     "larry@mhdtechcollab.com",
-    "alice@mhdtechkol.com",
+    "kate@mhdtechkol.com",
     "mark@mhdtechcollaboration.com",
     "michael@mhdtechstudio.com",
   ],
@@ -906,7 +906,6 @@ export default function InstantlyControlPanelPage() {
         <div className="space-y-5 rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
           <SectionHeader
             title="Push Single Campaign"
-            description="Create one Instantly campaign after leads are exported."
           />
 
           <form
