@@ -16,6 +16,7 @@ const EmailDiscoverySchema = new mongoose.Schema(
     hunter: { type: String, default: "" },
     apollo: { type: String, default: "" },
     prospeo: { type: String, default: "" },
+    prospeoCheckedAt: { type: Date, default: null },
 
     foundVia: { type: String, default: "" },
     seedBrandId: { type: mongoose.Schema.Types.ObjectId, default: null },

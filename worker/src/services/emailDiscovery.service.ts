@@ -8,6 +8,7 @@ import { ApolloRawContact } from "../models/ApolloRawContact.model";
 import { ProspeoRawContact } from "../models/ProspeoRawContact.model";
 import { PipelineTracker } from "../models/PipelineTracker.model";
 import { logDone, logError } from "./runLog.service";
+import { searchProspeoContacts } from "./prospeo.service";
 
 const BrandMapModel = BrandMap as any;
 const ContactModel = Contact as any;
@@ -124,6 +125,10 @@ function uniqueEmails(emails: string[]) {
 function extractEmails(text: string) {
   const matches = String(text || "").match(EMAIL_REGEX) || [];
   return uniqueEmails(matches);
+}
+
+function hasRealEmailCell(value: any) {
+  return extractEmails(String(value || "")).length > 0;
 }
 
 function formatSourceCell(result: SourceResult) {
@@ -756,50 +761,18 @@ async function discoverApollo(brandName: string, domain: string) {
 }
 
 async function discoverProspeo(brandName: string, domain: string) {
-  const key = process.env.PROSPEO_API_KEY || "";
-  const baseUrl = process.env.PROSPEO_BASE_URL || "https://api.prospeo.io";
-
-  if (!key) return [];
+  if (!process.env.PROSPEO_API_KEY) return [];
 
   try {
-    const response = await axios.post(
-      baseUrl + (process.env.PROSPEO_SEARCH_PERSON_ENDPOINT || "/search-person"),
-      {
-        company: brandName,
-        domain,
-        job_titles: [
-          "partnerships",
-          "influencer marketing",
-          "affiliate marketing",
-          "marketing",
-          "pr",
-          "media"
-        ]
-      },
-      {
-        headers: {
-          "Content-Type": "application/json",
-          "X-KEY": key
-        },
-        timeout: 45000,
-        validateStatus: () => true
-      }
-    );
-
-    const people =
-      response.data?.data ||
-      response.data?.people ||
-      response.data?.results ||
-      [];
-
+    const contacts = await searchProspeoContacts(domain);
     const emails: string[] = [];
 
-    for (const person of people.slice(0, 10)) {
-      const email = cleanEmail(person.email);
+    for (const contact of contacts.slice(0, 10)) {
+      const email = cleanEmail(contact.email);
       if (!isValidEmail(email)) continue;
 
-      const fullName = cleanText(person.name || person.full_name);
-      const title = cleanText(person.title || person.position);
+      const fullName = cleanText(contact.fullName);
+      const title = cleanText(contact.designation || contact.role);
 
       await ProspeoRawContactModel.findOneAndUpdate(
         {
@@ -813,10 +786,10 @@ async function discoverProspeo(brandName: string, domain: string) {
             domain,
             fullName,
             title,
-            country: cleanText(person.country),
+            country: cleanText(contact.country),
             email,
-            emailStatus: cleanText(person.email_status || person.status),
-            raw: person
+            emailStatus: cleanText(contact.emailStatus),
+            raw: contact.raw || contact
           }
         },
         { upsert: true, new: true }
@@ -829,14 +802,15 @@ async function discoverProspeo(brandName: string, domain: string) {
         source: "prospeo",
         fullName,
         designation: title,
-        raw: person
+        raw: contact.raw || contact
       });
 
       emails.push(email);
     }
 
     return uniqueEmails(emails);
-  } catch {
+  } catch (error: any) {
+    console.error("Prospeo discovery failed:", error?.response?.data || error.message);
     return [];
   }
 }
@@ -857,12 +831,19 @@ export async function discoverEmailsForBrandMap(brandMap: any) {
   const existing = await EmailDiscoveryModel.findOne({ brandName, domain });
 
   if (existing?.totalEmails) {
-    return {
-      brandName,
-      domain,
-      status: "already_processed",
-      saved: 0
-    };
+    const shouldRefreshMissingProspeo =
+      process.env.PROSPEO_REFRESH_MISSING !== "false" &&
+      !hasRealEmailCell(existing.prospeo) &&
+      !existing.prospeoCheckedAt;
+
+    if (!shouldRefreshMissingProspeo) {
+      return {
+        brandName,
+        domain,
+        status: "already_processed",
+        saved: 0
+      };
+    }
   }
 
   const social = await discoverWebsiteAndSocial(brandName, domain);
@@ -919,6 +900,7 @@ export async function discoverEmailsForBrandMap(brandMap: any) {
           apolloEmails.length > 0 ? apolloEmails.join("\n") : "(No Apollo emails found)",
         prospeo:
           prospeoEmails.length > 0 ? prospeoEmails.join("\n") : "(No Prospeo emails found)",
+        prospeoCheckedAt: new Date(),
 
         foundVia: brandMap.foundVia || "",
         seedBrandId: brandMap.seedBrandId || null,

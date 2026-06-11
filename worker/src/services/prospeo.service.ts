@@ -5,8 +5,24 @@ function normalizeEmail(email: any) {
   return String(email || "").trim().toLowerCase();
 }
 
+function isValidEmail(email: string) {
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(email || "").trim());
+}
+
+function normalizeDomain(value: any) {
+  return String(value || "")
+    .trim()
+    .toLowerCase()
+    .replace(/^https?:\/\//, "")
+    .replace(/^www\./, "")
+    .split("/")[0]
+    .split("?")[0]
+    .replace(/\/$/, "");
+}
+
 function buildProspeoUrl(endpoint: string) {
-  return env.prospeoBaseUrl.replace(/\/$/, "") + endpoint;
+  const cleanEndpoint = endpoint.startsWith("/") ? endpoint : `/${endpoint}`;
+  return env.prospeoBaseUrl.replace(/\/$/, "") + cleanEndpoint;
 }
 
 function getProspeoHeaders() {
@@ -21,13 +37,18 @@ function getTargetTitles() {
     "marketing manager",
     "brand manager",
     "partnerships manager",
+    "partnership manager",
     "influencer marketing manager",
     "creator partnerships manager",
+    "affiliate marketing manager",
+    "affiliate manager",
+    "public relations manager",
+    "media relations manager",
+    "social media manager",
+    "sponsorship manager",
     "head of marketing",
     "director of marketing",
     "growth manager",
-    "affiliate manager",
-    "public relations manager",
     "pr manager"
   ];
 }
@@ -36,41 +57,144 @@ function sleep(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-async function enrichProspeoPerson(person: any, domain: string) {
-  const personId =
-    person.person_id ||
-    person.id ||
-    person?.person?.person_id ||
-    person?.person?.id;
+function formatProspeoError(error: any) {
+  const data = error?.response?.data || error?.data || error;
 
-  const fullName =
-    person.full_name ||
-    person.name ||
+  if (data?.error_code || data?.filter_error || data?.message) {
+    return {
+      status: error?.response?.status,
+      error_code: data.error_code,
+      filter_error: data.filter_error,
+      message: data.message
+    };
+  }
+
+  return error?.message || data;
+}
+
+function getPersonId(person: any) {
+  return (
+    person?.person_id ||
+    person?.id ||
+    person?.person?.person_id ||
+    person?.person?.id ||
+    ""
+  );
+}
+
+function getFullName(person: any) {
+  const firstName = person?.first_name || person?.person?.first_name || "";
+  const lastName = person?.last_name || person?.person?.last_name || "";
+
+  return (
+    person?.full_name ||
+    person?.name ||
     person?.person?.full_name ||
     person?.person?.name ||
-    "";
+    [firstName, lastName].filter(Boolean).join(" ")
+  );
+}
 
-  const firstName =
-    person.first_name ||
-    person?.person?.first_name ||
-    "";
+function getFirstName(person: any) {
+  return person?.first_name || person?.person?.first_name || "";
+}
 
-  const lastName =
-    person.last_name ||
-    person?.person?.last_name ||
-    "";
+function getLastName(person: any) {
+  return person?.last_name || person?.person?.last_name || "";
+}
+
+function getCurrentTitle(person: any) {
+  return (
+    person?.current_job_title ||
+    person?.job_title ||
+    person?.title ||
+    person?.headline ||
+    ""
+  );
+}
+
+function extractProspeoEmail(value: any) {
+  if (!value) return "";
+
+  if (typeof value === "string") {
+    const email = normalizeEmail(value);
+    return isValidEmail(email) ? email : "";
+  }
+
+  const email = normalizeEmail(
+    value.email || value.value || value.address || value.email_address
+  );
+
+  return isValidEmail(email) ? email : "";
+}
+
+function extractProspeoEmailStatus(value: any) {
+  if (!value || typeof value !== "object") return "";
+  return String(value.status || value.email_status || value.verification_status || "");
+}
+
+function getEmailFromEnrichment(enriched: any) {
+  const person = enriched?.person || enriched;
+
+  return (
+    extractProspeoEmail(person?.email) ||
+    extractProspeoEmail(enriched?.email) ||
+    extractProspeoEmail(person?.work_email) ||
+    extractProspeoEmail(enriched?.work_email)
+  );
+}
+
+function getEmailStatusFromEnrichment(enriched: any) {
+  const person = enriched?.person || enriched;
+
+  return (
+    extractProspeoEmailStatus(person?.email) ||
+    extractProspeoEmailStatus(enriched?.email) ||
+    String(person?.email_status || enriched?.email_status || "")
+  );
+}
+
+async function postProspeo(endpoint: string, payload: Record<string, any>) {
+  const response = await axios.post(buildProspeoUrl(endpoint), payload, {
+    headers: getProspeoHeaders(),
+    timeout: 45000,
+    validateStatus: () => true
+  });
+
+  if (response.status >= 400 || response.data?.error) {
+    const error: any = new Error(response.data?.error_code || "PROSPEO_API_ERROR");
+    error.response = response;
+    throw error;
+  }
+
+  return response.data;
+}
+
+async function enrichProspeoPerson(person: any, company: any, domain: string) {
+  const personId = getPersonId(person);
+  const fullName = getFullName(person);
+  const firstName = getFirstName(person);
+  const lastName = getLastName(person);
+  const companyWebsite = normalizeDomain(
+    company?.domain || company?.website || domain
+  );
+  const companyName = company?.name || company?.company_name || "";
 
   const data: Record<string, any> = {};
 
   if (personId) {
     data.person_id = personId;
-  } else if (fullName) {
+  } else if (fullName && companyWebsite) {
     data.full_name = fullName;
-    data.company_website = domain;
-  } else if (firstName && lastName) {
+    data.company_website = companyWebsite;
+    if (companyName) data.company_name = companyName;
+  } else if (firstName && lastName && companyWebsite) {
     data.first_name = firstName;
     data.last_name = lastName;
-    data.company_website = domain;
+    data.company_website = companyWebsite;
+    if (companyName) data.company_name = companyName;
+  } else if (person?.linkedin_url) {
+    data.linkedin_url = person.linkedin_url;
   } else {
     return null;
   }
@@ -78,26 +202,69 @@ async function enrichProspeoPerson(person: any, domain: string) {
   try {
     await sleep(env.prospeoRequestDelayMs || 1500);
 
-    const response = await axios.post(
-      buildProspeoUrl(env.prospeoEnrichPersonEndpoint || "/enrich-person"),
-      {
-        only_verified_email: true,
-        data
-      },
-      {
-        headers: getProspeoHeaders(),
-        timeout: 30000
-      }
-    );
-
-    return response.data?.response || response.data?.data || response.data;
+    return await postProspeo(env.prospeoEnrichPersonEndpoint || "/enrich-person", {
+      only_verified_email: true,
+      enrich_mobile: false,
+      data
+    });
   } catch (error: any) {
-    console.error(
-      "Prospeo enrich failed:",
-      error?.response?.data || error.message
-    );
+    const errorCode = error?.response?.data?.error_code;
+
+    if (errorCode !== "NO_MATCH") {
+      console.error("Prospeo enrich failed:", formatProspeoError(error));
+    }
 
     return null;
+  }
+}
+
+function buildSearchPayload(domain: string, includeTitleFilter: boolean) {
+  const filters: Record<string, any> = {
+    company: {
+      websites: {
+        include: [domain]
+      }
+    },
+    person_contact_details: {
+      email: ["VERIFIED"],
+      operator: "OR",
+      hide_people_with_details_already_revealed: false
+    },
+    max_person_per_company: Math.min(Number(env.maxContactsPerBrand || 10), 25)
+  };
+
+  if (includeTitleFilter) {
+    filters.person_job_title = {
+      include: getTargetTitles(),
+      match_mode: "CONTAINS"
+    };
+  }
+
+  return {
+    page: 1,
+    filters
+  };
+}
+
+async function searchProspeoPage(domain: string, includeTitleFilter: boolean) {
+  try {
+    await sleep(env.prospeoRequestDelayMs || 1500);
+
+    const data = await postProspeo(
+      env.prospeoSearchPersonEndpoint || "/search-person",
+      buildSearchPayload(domain, includeTitleFilter)
+    );
+
+    return data?.results || [];
+  } catch (error: any) {
+    const errorCode = error?.response?.data?.error_code;
+
+    if (errorCode === "NO_RESULTS") {
+      return [];
+    }
+
+    console.error("Prospeo search failed:", formatProspeoError(error));
+    return [];
   }
 }
 
@@ -107,105 +274,74 @@ export async function searchProspeoContacts(domain: string) {
     return [];
   }
 
-  if (!domain) return [];
+  const normalizedDomain = normalizeDomain(domain);
 
-  try {
-    await sleep(env.prospeoRequestDelayMs || 1500);
+  if (!normalizedDomain) return [];
 
-    const response = await axios.post(
-      buildProspeoUrl(env.prospeoSearchPersonEndpoint || "/search-person"),
-      {
-        page: 1,
-        filters: {
-          company: {
-            websites: {
-              include: [domain]
-            }
-          },
-          person: {
-            job_titles: {
-              include: getTargetTitles()
-            }
-          }
-        }
-      },
-      {
-        headers: getProspeoHeaders(),
-        timeout: 30000
+  const targetedResults = await searchProspeoPage(normalizedDomain, true);
+  const results =
+    targetedResults.length > 0
+      ? targetedResults
+      : await searchProspeoPage(normalizedDomain, false);
+
+  const contacts = [];
+
+  for (const result of results.slice(0, env.maxContactsPerBrand || 10)) {
+    const person = result.person || result;
+    const company = result.company || {};
+    const enriched = await enrichProspeoPerson(person, company, normalizedDomain);
+
+    if (!enriched) continue;
+
+    const enrichedPerson = enriched.person || enriched;
+    const enrichedCompany = enriched.company || company;
+    const email = getEmailFromEnrichment(enriched);
+
+    if (!email) continue;
+
+    const firstName = enrichedPerson.first_name || person.first_name || "";
+    const lastName = enrichedPerson.last_name || person.last_name || "";
+    const fullName =
+      enrichedPerson.full_name ||
+      enrichedPerson.name ||
+      person.full_name ||
+      person.name ||
+      [firstName, lastName].filter(Boolean).join(" ");
+    const designation =
+      enrichedPerson.current_job_title ||
+      getCurrentTitle(enrichedPerson) ||
+      getCurrentTitle(person);
+    const emailStatus = getEmailStatusFromEnrichment(enriched);
+
+    contacts.push({
+      fullName,
+      firstName,
+      lastName,
+      email,
+      designation,
+      role: designation,
+      department: Array.isArray(enrichedPerson?.job_history?.[0]?.departments)
+        ? enrichedPerson.job_history[0].departments.join(", ")
+        : "",
+      country:
+        enrichedPerson?.location?.country ||
+        enrichedCompany?.location?.country ||
+        "",
+      emailStatus,
+      confidence: emailStatus.toUpperCase() === "VERIFIED" ? 100 : 80,
+      source: "prospeo" as const,
+      raw: {
+        searchResult: result,
+        enriched,
+        company: enrichedCompany
       }
-    );
-
-    const results = response.data?.results || [];
-
-    const contacts = [];
-
-    for (const result of results.slice(0, env.maxContactsPerBrand || 10)) {
-      const person = result.person || result;
-      const company = result.company || {};
-      const enriched = await enrichProspeoPerson(person, domain);
-
-      if (!enriched) continue;
-
-      const enrichedPerson = enriched.person || enriched;
-      const email =
-        normalizeEmail(enriched.email) ||
-        normalizeEmail(enrichedPerson.email) ||
-        normalizeEmail(enrichedPerson.work_email);
-
-      if (!email) continue;
-
-      const firstName =
-        enrichedPerson.first_name ||
-        person.first_name ||
-        "";
-
-      const lastName =
-        enrichedPerson.last_name ||
-        person.last_name ||
-        "";
-
-      const fullName =
-        enrichedPerson.full_name ||
-        enrichedPerson.name ||
-        person.full_name ||
-        person.name ||
-        [firstName, lastName].filter(Boolean).join(" ");
-
-      contacts.push({
-        fullName,
-        firstName,
-        lastName,
-        email,
-        designation:
-          enrichedPerson.job_title ||
-          enrichedPerson.title ||
-          person.job_title ||
-          person.title ||
-          "",
-        role:
-          enrichedPerson.job_title ||
-          enrichedPerson.title ||
-          person.job_title ||
-          person.title ||
-          "",
-        department: "",
-        confidence: Number(enriched.email_status === "verified" ? 100 : 0),
-        source: "prospeo" as const,
-        raw: {
-          searchResult: result,
-          enriched,
-          company
-        }
-      });
-    }
-
-    return contacts;
-  } catch (error: any) {
-    console.error(
-      "Prospeo search failed:",
-      error?.response?.data || error.message
-    );
-
-    return [];
+    });
   }
+
+  const seen = new Set<string>();
+  return contacts.filter((contact) => {
+    if (seen.has(contact.email)) return false;
+    seen.add(contact.email);
+    return true;
+  });
 }
