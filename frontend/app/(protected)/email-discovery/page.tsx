@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { ExternalLink } from "lucide-react";
 import { apiGet } from "@/lib/api";
 import { cn } from "@/lib/utils";
@@ -60,6 +60,50 @@ function clean(value: unknown) {
   }
 
   return text;
+}
+
+function buildPaginatedEndpoint(endpoint: string, page: number, limit: number) {
+  const separator = endpoint.includes("?") ? "&" : "?";
+
+  return `${endpoint}${separator}${new URLSearchParams({
+    page: String(page),
+    limit: String(limit),
+  }).toString()}`;
+}
+
+function getRowIdentity(row: EmailDiscoveryRow) {
+  return (
+    row._id ||
+    [
+      clean(row.brandName),
+      clean(row.domain),
+      clean(row.totalEmails),
+      clean(row.hunter),
+      clean(row.apollo),
+      clean(row.prospeo),
+    ]
+      .filter(Boolean)
+      .join("-")
+  );
+}
+
+function mergeUniqueRows(
+  previousRows: EmailDiscoveryRow[],
+  nextRows: EmailDiscoveryRow[]
+) {
+  const map = new Map<string, EmailDiscoveryRow>();
+
+  previousRows.forEach((row, index) => {
+    const key = getRowIdentity(row) || `previous-row-${index}`;
+    map.set(key, row);
+  });
+
+  nextRows.forEach((row, index) => {
+    const key = getRowIdentity(row) || `next-row-${index}`;
+    map.set(key, row);
+  });
+
+  return Array.from(map.values());
 }
 
 function extractEmail(value: string) {
@@ -230,7 +274,9 @@ function ClickableValue({
         rel="noreferrer"
         className={cn(
           "inline-flex max-w-full items-center break-all !underline !underline-offset-4 hover:!text-blue-700",
-          strong ? "!font-semibold !text-blue-600" : "!font-medium !text-blue-600"
+          strong
+            ? "!font-semibold !text-blue-600"
+            : "!font-medium !text-blue-600"
         )}
       >
         <span>{text}</span>
@@ -243,7 +289,9 @@ function ClickableValue({
     <span
       className={cn(
         "whitespace-pre-wrap break-words text-xs leading-5",
-        strong ? "!font-semibold !text-slate-900" : "!font-medium !text-slate-600"
+        strong
+          ? "!font-semibold !text-slate-900"
+          : "!font-medium !text-slate-600"
       )}
     >
       {text}
@@ -278,30 +326,78 @@ function ClickableMultilineCell({
 export default function EmailDiscoveryPage() {
   const [rows, setRows] = useState<EmailDiscoveryRow[]>([]);
   const [loading, setLoading] = useState(true);
+  const [loadingMore, setLoadingMore] = useState(false);
+
+  const [nextPage, setNextPage] = useState(1);
+  const [hasMore, setHasMore] = useState(true);
+  const [totalRows, setTotalRows] = useState(0);
 
   const [search, setSearch] = useState("");
   const [domain, setDomain] = useState(ALL_VALUE);
   const [provider, setProvider] = useState(ALL_VALUE);
   const [emailStatus, setEmailStatus] = useState(ALL_VALUE);
 
-  const [page, setPage] = useState(1);
-
-  async function loadRows() {
-    setLoading(true);
-
-    try {
-      const response = await apiGet("/email-discovery");
-      setRows(response?.data || []);
-    } catch {
-      setRows([]);
+  const loadRows = useCallback(async (pageToLoad = 1, append = false) => {
+    if (append) {
+      setLoadingMore(true);
+    } else {
+      setLoading(true);
     }
 
-    setLoading(false);
-  }
+    try {
+      const response = await apiGet(
+        buildPaginatedEndpoint("/email-discovery", pageToLoad, PAGE_SIZE)
+      );
+
+      const nextRows: EmailDiscoveryRow[] = response?.data || [];
+
+      setRows((previousRows) =>
+        append ? mergeUniqueRows(previousRows, nextRows) : nextRows
+      );
+
+      setTotalRows(response?.total || nextRows.length);
+
+      const pagination = response?.pagination;
+      const more =
+        typeof pagination?.hasMore === "boolean"
+          ? pagination.hasMore
+          : nextRows.length === PAGE_SIZE;
+
+      setHasMore(more);
+      setNextPage(pagination?.nextPage || (more ? pageToLoad + 1 : pageToLoad));
+    } catch {
+      if (!append) {
+        setRows([]);
+        setTotalRows(0);
+      }
+
+      setHasMore(false);
+    } finally {
+      setLoading(false);
+      setLoadingMore(false);
+    }
+  }, []);
 
   useEffect(() => {
-    loadRows();
-  }, []);
+    setRows([]);
+    setNextPage(1);
+    setHasMore(true);
+    setTotalRows(0);
+    loadRows(1, false);
+  }, [loadRows]);
+
+  function handleLoadMore() {
+    if (loading || loadingMore || !hasMore) return;
+
+    loadRows(nextPage, true);
+  }
+
+  function clearFilters() {
+    setSearch("");
+    setDomain(ALL_VALUE);
+    setProvider(ALL_VALUE);
+    setEmailStatus(ALL_VALUE);
+  }
 
   const domainOptions = useMemo(
     () => getUniqueOptions(rows, (row) => row.domain || ""),
@@ -313,10 +409,6 @@ export default function EmailDiscoveryPage() {
     domain !== ALL_VALUE ||
     provider !== ALL_VALUE ||
     emailStatus !== ALL_VALUE;
-
-  useEffect(() => {
-    setPage(1);
-  }, [search, domain, provider, emailStatus]);
 
   const filteredRows = useMemo(() => {
     const query = search.trim().toLowerCase();
@@ -340,20 +432,6 @@ export default function EmailDiscoveryPage() {
       );
     });
   }, [rows, search, domain, provider, emailStatus]);
-
-  const visibleRows = useMemo(() => {
-    return filteredRows.slice(0, page * PAGE_SIZE);
-  }, [filteredRows, page]);
-
-  const totalPages = Math.max(1, Math.ceil(filteredRows.length / PAGE_SIZE));
-
-  function clearFilters() {
-    setSearch("");
-    setDomain(ALL_VALUE);
-    setProvider(ALL_VALUE);
-    setEmailStatus(ALL_VALUE);
-    setPage(1);
-  }
 
   const columns = useMemo<AdminTableColumn<EmailDiscoveryRow>[]>(
     () => [
@@ -545,7 +623,7 @@ export default function EmailDiscoveryPage() {
       </section>
 
       <AdminTable
-        data={visibleRows}
+        data={filteredRows}
         columns={columns}
         rowKey={(row, index) =>
           row._id || `${row.brandName}-${row.domain}-${index}`
@@ -563,17 +641,23 @@ export default function EmailDiscoveryPage() {
             : "Email discovery records will appear here."
         }
         containerClassName="rounded-xl shadow-none"
-        pagination={{
-          page,
-          totalPages,
-          totalItems: filteredRows.length,
-          limit: PAGE_SIZE,
-          onPageChange: setPage,
-          loading,
-          showSummary: true,
-          showRowsSelector: false,
-        }}
       />
+
+      <div className="flex flex-col items-center justify-center">
+
+        <Button
+          type="button"
+          onClick={handleLoadMore}
+          disabled={loading || loadingMore || !hasMore}
+          className="rounded-xl"
+        >
+          {loadingMore
+            ? "Loading more..."
+            : hasMore
+              ? `Load more ${PAGE_SIZE}`
+              : "All rows loaded"}
+        </Button>
+      </div>
     </main>
   );
 }

@@ -1,9 +1,8 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { ExternalLink, X } from "lucide-react";
 import { apiGet } from "@/lib/api";
-import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import AdminTable, {
   type AdminTableColumn,
@@ -49,6 +48,46 @@ function clean(value: unknown) {
   }
 
   return text;
+}
+
+function buildPaginatedEndpoint(endpoint: string, page: number, limit: number) {
+  const separator = endpoint.includes("?") ? "&" : "?";
+
+  return `${endpoint}${separator}${new URLSearchParams({
+    page: String(page),
+    limit: String(limit),
+  }).toString()}`;
+}
+
+function getRowIdentity(row: RawContact) {
+  return (
+    row._id ||
+    [
+      clean(row.brandName),
+      clean(row.domain),
+      clean(row.email),
+      clean(row.fullName || row.name),
+      clean(row.title),
+    ]
+      .filter(Boolean)
+      .join("-")
+  );
+}
+
+function mergeUniqueRows(previousRows: RawContact[], nextRows: RawContact[]) {
+  const map = new Map<string, RawContact>();
+
+  previousRows.forEach((row, index) => {
+    const key = getRowIdentity(row) || `previous-row-${index}`;
+    map.set(key, row);
+  });
+
+  nextRows.forEach((row, index) => {
+    const key = getRowIdentity(row) || `next-row-${index}`;
+    map.set(key, row);
+  });
+
+  return Array.from(map.values());
 }
 
 function isBadEmail(email: string) {
@@ -165,18 +204,18 @@ function apolloStatus(row: RawContact) {
 
   return clean(
     row.emailVerified ||
-      row.emailStatus ||
-      row.verificationStatus ||
-      row.status
+    row.emailStatus ||
+    row.verificationStatus ||
+    row.status
   );
 }
 
 function regularStatus(row: RawContact) {
   return clean(
     row.emailStatus ||
-      row.emailVerified ||
-      row.verificationStatus ||
-      row.status
+    row.emailVerified ||
+    row.verificationStatus ||
+    row.status
   );
 }
 
@@ -252,11 +291,7 @@ function ClickableDomain({ value }: { value?: string }) {
   if (!domain) return <span className="text-slate-300">-</span>;
 
   if (!url) {
-    return (
-      <span className="!font-medium !text-slate-700">
-        {domain}
-      </span>
-    );
+    return <span className="!font-medium !text-slate-700">{domain}</span>;
   }
 
   return (
@@ -279,11 +314,7 @@ function ClickableEmail({ value }: { value?: string }) {
     return <span className="text-slate-300">-</span>;
   }
 
-  return (
-    <span className="break-all !font-medium !text-slate-700">
-      {email}
-    </span>
-  );
+  return <span className="break-all !font-medium !text-slate-700">{email}</span>;
 }
 
 function StatusBadge({ value }: { value: string }) {
@@ -349,6 +380,11 @@ export function RawContactsTable({
 }) {
   const [rows, setRows] = useState<RawContact[]>([]);
   const [loading, setLoading] = useState(true);
+  const [loadingMore, setLoadingMore] = useState(false);
+
+  const [nextPage, setNextPage] = useState(1);
+  const [hasMore, setHasMore] = useState(true);
+  const [totalRows, setTotalRows] = useState(0);
 
   const [search, setSearch] = useState("");
   const [domain, setDomain] = useState(ALL_VALUE);
@@ -356,24 +392,73 @@ export function RawContactsTable({
   const [emailFilter, setEmailFilter] = useState(ALL_VALUE);
   const [country, setCountry] = useState(ALL_VALUE);
 
-  const [page, setPage] = useState(1);
+  const loadRows = useCallback(
+    async (pageToLoad = 1, append = false) => {
+      if (append) {
+        setLoadingMore(true);
+      } else {
+        setLoading(true);
+      }
 
-  async function loadRows() {
-    setLoading(true);
+      try {
+        const response = await apiGet(
+          buildPaginatedEndpoint(endpoint, pageToLoad, PAGE_SIZE)
+        );
 
-    try {
-      const response = await apiGet(endpoint);
-      setRows(response?.data || []);
-    } catch {
-      setRows([]);
-    }
+        const nextRows: RawContact[] = response?.data || [];
 
-    setLoading(false);
-  }
+        setRows((previousRows) =>
+          append ? mergeUniqueRows(previousRows, nextRows) : nextRows
+        );
+
+        setTotalRows(response?.total || nextRows.length);
+
+        const pagination = response?.pagination;
+        const more =
+          typeof pagination?.hasMore === "boolean"
+            ? pagination.hasMore
+            : nextRows.length === PAGE_SIZE;
+
+        setHasMore(more);
+        setNextPage(
+          pagination?.nextPage || (more ? pageToLoad + 1 : pageToLoad)
+        );
+      } catch {
+        if (!append) {
+          setRows([]);
+          setTotalRows(0);
+        }
+
+        setHasMore(false);
+      } finally {
+        setLoading(false);
+        setLoadingMore(false);
+      }
+    },
+    [endpoint]
+  );
 
   useEffect(() => {
-    loadRows();
-  }, [endpoint]);
+    setRows([]);
+    setNextPage(1);
+    setHasMore(true);
+    setTotalRows(0);
+    loadRows(1, false);
+  }, [endpoint, loadRows]);
+
+  function handleLoadMore() {
+    if (loading || loadingMore || !hasMore) return;
+
+    loadRows(nextPage, true);
+  }
+
+  function clearFilters() {
+    setSearch("");
+    setDomain(ALL_VALUE);
+    setStatus(ALL_VALUE);
+    setEmailFilter(ALL_VALUE);
+    setCountry(ALL_VALUE);
+  }
 
   const domainOptions = useMemo(
     () => getUniqueOptions(rows, (row) => row.domain || ""),
@@ -396,10 +481,6 @@ export function RawContactsTable({
     status !== ALL_VALUE ||
     emailFilter !== ALL_VALUE ||
     country !== ALL_VALUE;
-
-  useEffect(() => {
-    setPage(1);
-  }, [search, domain, status, emailFilter, country]);
 
   const filteredRows = useMemo(() => {
     const query = search.trim().toLowerCase();
@@ -442,21 +523,6 @@ export function RawContactsTable({
     provider,
     includeCountry,
   ]);
-
-  const visibleRows = useMemo(() => {
-    return filteredRows.slice(0, page * PAGE_SIZE);
-  }, [filteredRows, page]);
-
-  const totalPages = Math.max(1, Math.ceil(filteredRows.length / PAGE_SIZE));
-
-  function clearFilters() {
-    setSearch("");
-    setDomain(ALL_VALUE);
-    setStatus(ALL_VALUE);
-    setEmailFilter(ALL_VALUE);
-    setCountry(ALL_VALUE);
-    setPage(1);
-  }
 
   const columns = useMemo<AdminTableColumn<RawContact>[]>(() => {
     const baseColumns: AdminTableColumn<RawContact>[] = [
@@ -609,7 +675,7 @@ export function RawContactsTable({
       </section>
 
       <AdminTable
-        data={visibleRows}
+        data={filteredRows}
         columns={columns}
         rowKey={(row, index) =>
           row._id || `${row.brandName}-${row.email}-${index}`
@@ -625,17 +691,22 @@ export function RawContactsTable({
             : `${title} records will appear here.`
         }
         containerClassName="rounded-xl shadow-none"
-        pagination={{
-          page,
-          totalPages,
-          totalItems: filteredRows.length,
-          limit: PAGE_SIZE,
-          onPageChange: setPage,
-          loading,
-          showSummary: true,
-          showRowsSelector: false,
-        }}
       />
+
+      <div className="flex flex-col items-center justify-center p-4">
+        <Button
+          type="button"
+          onClick={handleLoadMore}
+          disabled={loading || loadingMore || !hasMore}
+          className="rounded-xl"
+        >
+          {loadingMore
+            ? "Loading more..."
+            : hasMore
+              ? `Load more ${PAGE_SIZE}`
+              : "All rows loaded"}
+        </Button>
+      </div>
     </main>
   );
 }

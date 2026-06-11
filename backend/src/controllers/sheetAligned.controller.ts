@@ -20,21 +20,71 @@ const InstantlyLeadModel = InstantlyLead as any;
 const InstantlyTemplateModel = InstantlyTemplate as any;
 const PushLogModel = PushLog as any;
 
+function getNumberQuery(value: unknown, fallback: number, max?: number) {
+  const numberValue = Number(value);
+
+  if (!Number.isFinite(numberValue) || numberValue < 1) {
+    return fallback;
+  }
+
+  const safeValue = Math.floor(numberValue);
+
+  return max ? Math.min(safeValue, max) : safeValue;
+}
+
+function getPagination(req: Request) {
+  const page = getNumberQuery(req.query.page, 1);
+  const limit = getNumberQuery(req.query.limit, 1000, 1000);
+  const skip = (page - 1) * limit;
+
+  return { page, limit, skip };
+}
+
+async function paginatedOk(
+  req: Request,
+  res: Response,
+  model: any,
+  filter: Record<string, any> = {},
+  sort: Record<string, 1 | -1> = { updatedAt: -1 }
+) {
+  const { page, limit, skip } = getPagination(req);
+
+  const [rows, total] = await Promise.all([
+    model.find(filter).sort(sort).skip(skip).limit(limit),
+    model.countDocuments(filter)
+  ]);
+
+  const totalPages = Math.max(1, Math.ceil(total / limit));
+  const hasMore = page < totalPages;
+
+  res.json({
+    success: true,
+    count: rows.length,
+    total,
+    data: rows,
+    pagination: {
+      page,
+      limit,
+      total,
+      totalPages,
+      hasMore,
+      nextPage: hasMore ? page + 1 : null
+    }
+  });
+}
+
 function ok(res: Response, data: any[]) {
   res.json({
     success: true,
     count: data.length,
+    total: data.length,
     data
   });
 }
 
 export async function getEmailDiscoveryRows(req: Request, res: Response) {
   try {
-    const rows = await EmailDiscoveryModel.find({})
-      .sort({ updatedAt: -1 })
-      .limit(3000);
-
-    ok(res, rows);
+    await paginatedOk(req, res, EmailDiscoveryModel);
   } catch (error: any) {
     res.status(500).json({ success: false, message: error.message });
   }
@@ -42,11 +92,7 @@ export async function getEmailDiscoveryRows(req: Request, res: Response) {
 
 export async function getHunterRawContacts(req: Request, res: Response) {
   try {
-    const rows = await HunterRawContactModel.find({})
-      .sort({ updatedAt: -1 })
-      .limit(3000);
-
-    ok(res, rows);
+    await paginatedOk(req, res, HunterRawContactModel);
   } catch (error: any) {
     res.status(500).json({ success: false, message: error.message });
   }
@@ -54,11 +100,7 @@ export async function getHunterRawContacts(req: Request, res: Response) {
 
 export async function getApolloRawContacts(req: Request, res: Response) {
   try {
-    const rows = await ApolloRawContactModel.find({})
-      .sort({ updatedAt: -1 })
-      .limit(3000);
-
-    ok(res, rows);
+    await paginatedOk(req, res, ApolloRawContactModel);
   } catch (error: any) {
     res.status(500).json({ success: false, message: error.message });
   }
@@ -66,11 +108,7 @@ export async function getApolloRawContacts(req: Request, res: Response) {
 
 export async function getProspeoRawContacts(req: Request, res: Response) {
   try {
-    const rows = await ProspeoRawContactModel.find({})
-      .sort({ updatedAt: -1 })
-      .limit(3000);
-
-    ok(res, rows);
+    await paginatedOk(req, res, ProspeoRawContactModel);
   } catch (error: any) {
     res.status(500).json({ success: false, message: error.message });
   }
