@@ -118,6 +118,85 @@ function isValidEmail(email: string) {
   return !JUNK_PATTERNS.some((junk) => lower.includes(junk));
 }
 
+function normalizeProviderStatus(value: any, hasEmail = false) {
+  const raw = cleanText(value);
+  const lower = raw.toLowerCase().replace(/[\s_-]+/g, " ").trim();
+
+  if (!lower) return hasEmail ? "Verified" : "";
+
+  if (["verified", "valid", "ok", "deliverable", "accepted"].includes(lower)) {
+    return "Verified";
+  }
+
+  if (["revealed", "found", "available"].includes(lower)) {
+    return "Revealed";
+  }
+
+  if (["has email", "hasemail", "has emails", "true"].includes(lower)) {
+    return "Has Email";
+  }
+
+  if (
+    ["no email", "no emails", "no email found", "not found", "unavailable", "false"].includes(
+      lower
+    )
+  ) {
+    return "No Email";
+  }
+
+  if (["invalid", "failed", "error", "undeliverable", "rejected"].includes(lower)) {
+    return "Invalid";
+  }
+
+  return raw;
+}
+
+function normalizeHunterEmailStatus(value: any, hasEmail = false) {
+  const raw = cleanText(value);
+  const lower = raw.toLowerCase().replace(/[\s_-]+/g, " ").trim();
+
+  if (!lower) return hasEmail ? "Yes" : "No";
+
+  if (
+    [
+      "verified",
+      "valid",
+      "ok",
+      "deliverable",
+      "accepted",
+      "accept all",
+      "acceptall",
+      "has email",
+      "hasemail",
+      "has emails",
+      "true"
+    ].includes(lower) ||
+    /^\d+$/.test(lower)
+  ) {
+    return hasEmail ? "Yes" : "No";
+  }
+
+  if (
+    [
+      "invalid",
+      "failed",
+      "error",
+      "undeliverable",
+      "rejected",
+      "no email",
+      "no emails",
+      "no email found",
+      "not found",
+      "unavailable",
+      "false"
+    ].includes(lower)
+  ) {
+    return "No";
+  }
+
+  return hasEmail ? "Yes" : "No";
+}
+
 function uniqueEmails(emails: string[]) {
   return Array.from(new Set(emails.map(cleanEmail))).filter(isValidEmail);
 }
@@ -525,7 +604,10 @@ async function discoverHunter(brandName: string, domain: string) {
             title: cleanText(item.position),
             country: cleanText(item.country),
             email,
-            emailStatus: cleanText(item.verification?.status || item.confidence),
+            emailStatus: normalizeHunterEmailStatus(
+              item.verification?.status || item.verification?.result || item.status || item.confidence,
+              true
+            ),
             raw: item
           }
         },
@@ -665,8 +747,11 @@ async function discoverApollo(brandName: string, domain: string) {
               domain,
               fullName,
               title: cleanText(person.title),
-              email: cleanEmail(person.email),
-              emailVerified: cleanText(person.email_status || person.email_verified),
+              email: isValidEmail(cleanEmail(person.email)) ? cleanEmail(person.email) : "",
+              emailVerified: normalizeProviderStatus(
+                person.email_status || person.email_verified || (person.has_email ? "Has Email" : "No Email"),
+                isValidEmail(cleanEmail(person.email))
+              ),
               apolloPersonId: String(person.id || ""),
               raw: person
             }
@@ -734,8 +819,10 @@ async function discoverApollo(brandName: string, domain: string) {
           },
           {
             $set: {
+              fullName,
+              title: cleanText(person.title),
               email,
-              emailVerified: "revealed"
+              emailVerified: normalizeProviderStatus(person.email_status || "Revealed", true)
             }
           }
         );
@@ -788,7 +875,7 @@ async function discoverProspeo(brandName: string, domain: string) {
             title,
             country: cleanText(contact.country),
             email,
-            emailStatus: cleanText(contact.emailStatus),
+            emailStatus: normalizeProviderStatus(contact.emailStatus || "Found", true),
             raw: contact.raw || contact
           }
         },
@@ -836,7 +923,13 @@ export async function discoverEmailsForBrandMap(brandMap: any) {
       !hasRealEmailCell(existing.prospeo) &&
       !existing.prospeoCheckedAt;
 
-    if (!shouldRefreshMissingProspeo) {
+    // Use PROSPEO_REFRESH_ALL=true temporarily after this fix to re-run
+    // old records that were previously saved with verified-only Prospeo data.
+    // prospeoAllCheckedAt prevents repeated refreshes once the all-status run is done.
+    const shouldRefreshAllProspeo =
+      process.env.PROSPEO_REFRESH_ALL === "true" && !existing.prospeoAllCheckedAt;
+
+    if (!shouldRefreshMissingProspeo && !shouldRefreshAllProspeo) {
       return {
         brandName,
         domain,
@@ -901,6 +994,7 @@ export async function discoverEmailsForBrandMap(brandMap: any) {
         prospeo:
           prospeoEmails.length > 0 ? prospeoEmails.join("\n") : "(No Prospeo emails found)",
         prospeoCheckedAt: new Date(),
+        prospeoAllCheckedAt: process.env.PROSPEO_ONLY_VERIFIED_EMAIL === "true" ? null : new Date(),
 
         foundVia: brandMap.foundVia || "",
         seedBrandId: brandMap.seedBrandId || null,

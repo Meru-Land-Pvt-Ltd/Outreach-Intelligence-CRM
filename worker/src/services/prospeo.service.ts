@@ -203,7 +203,7 @@ async function enrichProspeoPerson(person: any, company: any, domain: string) {
     await sleep(env.prospeoRequestDelayMs || 1500);
 
     return await postProspeo(env.prospeoEnrichPersonEndpoint || "/enrich-person", {
-      only_verified_email: true,
+      only_verified_email: Boolean(env.prospeoOnlyVerifiedEmail),
       enrich_mobile: false,
       data
     });
@@ -218,20 +218,26 @@ async function enrichProspeoPerson(person: any, company: any, domain: string) {
   }
 }
 
-function buildSearchPayload(domain: string, includeTitleFilter: boolean) {
+function buildSearchPayload(
+  domain: string,
+  includeTitleFilter: boolean,
+  page: number
+) {
   const filters: Record<string, any> = {
     company: {
       websites: {
         include: [domain]
       }
     },
-    person_contact_details: {
+    max_person_per_company: Math.min(Number(env.maxContactsPerBrand || 20), 25)
+  };
+  if (env.prospeoOnlyVerifiedEmail) {
+    filters.person_contact_details = {
       email: ["VERIFIED"],
       operator: "OR",
       hide_people_with_details_already_revealed: false
-    },
-    max_person_per_company: Math.min(Number(env.maxContactsPerBrand || 10), 25)
-  };
+    };
+  }
 
   if (includeTitleFilter) {
     filters.person_job_title = {
@@ -241,18 +247,22 @@ function buildSearchPayload(domain: string, includeTitleFilter: boolean) {
   }
 
   return {
-    page: 1,
+    page,
     filters
   };
 }
 
-async function searchProspeoPage(domain: string, includeTitleFilter: boolean) {
+async function searchProspeoPage(
+  domain: string,
+  includeTitleFilter: boolean,
+  page: number
+) {
   try {
     await sleep(env.prospeoRequestDelayMs || 1500);
 
     const data = await postProspeo(
       env.prospeoSearchPersonEndpoint || "/search-person",
-      buildSearchPayload(domain, includeTitleFilter)
+      buildSearchPayload(domain, includeTitleFilter, page)
     );
 
     return data?.results || [];
@@ -268,6 +278,50 @@ async function searchProspeoPage(domain: string, includeTitleFilter: boolean) {
   }
 }
 
+async function searchProspeoPages(domain: string, includeTitleFilter: boolean) {
+  const pageLimit = Math.max(1, Math.min(Number(env.prospeoSearchPages || 3), 10));
+  const collected: any[] = [];
+
+  for (let page = 1; page <= pageLimit; page += 1) {
+    const results = await searchProspeoPage(domain, includeTitleFilter, page);
+
+    if (results.length === 0) break;
+
+    collected.push(...results);
+
+    // Prospeo search pages are fixed-size. If fewer than 25 came back,
+    // there is normally no next page to fetch.
+    if (results.length < 25) break;
+  }
+
+  return collected;
+}
+
+function uniqueProspeoResults(results: any[]) {
+  const seen = new Set<string>();
+  const unique: any[] = [];
+
+  for (const result of results) {
+    const person = result.person || result;
+    const key =
+      getPersonId(person) ||
+      [
+        getFullName(person).toLowerCase(),
+        getCurrentTitle(person).toLowerCase(),
+        person?.linkedin_url || ""
+      ]
+        .filter(Boolean)
+        .join("|");
+
+    if (!key || seen.has(key)) continue;
+
+    seen.add(key);
+    unique.push(result);
+  }
+
+  return unique;
+}
+
 export async function searchProspeoContacts(domain: string) {
   if (!env.prospeoApiKey || env.prospeoApiKey.includes("your_")) {
     console.log("Prospeo skipped: PROSPEO_API_KEY missing");
@@ -278,15 +332,14 @@ export async function searchProspeoContacts(domain: string) {
 
   if (!normalizedDomain) return [];
 
-  const targetedResults = await searchProspeoPage(normalizedDomain, true);
-  const results =
-    targetedResults.length > 0
-      ? targetedResults
-      : await searchProspeoPage(normalizedDomain, false);
+  const targetedResults = await searchProspeoPages(normalizedDomain, true);
+  const broadResults = await searchProspeoPages(normalizedDomain, false);
+  const results = uniqueProspeoResults([...targetedResults, ...broadResults]);
 
   const contacts = [];
+  const maxContacts = Math.max(1, Number(env.maxContactsPerBrand || 20));
 
-  for (const result of results.slice(0, env.maxContactsPerBrand || 10)) {
+  for (const result of results.slice(0, maxContacts)) {
     const person = result.person || result;
     const company = result.company || {};
     const enriched = await enrichProspeoPerson(person, company, normalizedDomain);
@@ -311,7 +364,10 @@ export async function searchProspeoContacts(domain: string) {
       enrichedPerson.current_job_title ||
       getCurrentTitle(enrichedPerson) ||
       getCurrentTitle(person);
-    const emailStatus = getEmailStatusFromEnrichment(enriched);
+    const emailStatus =
+      getEmailStatusFromEnrichment(enriched) ||
+      getEmailStatusFromEnrichment(result) ||
+      "Found";
 
     contacts.push({
       fullName,

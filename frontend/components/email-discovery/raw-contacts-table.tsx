@@ -28,7 +28,23 @@ type RawContact = {
   verificationStatus?: string;
   status?: string;
   country?: string;
+  apolloPersonId?: string;
   raw?: any;
+};
+
+type PaginatedResponse<T> = {
+  success?: boolean;
+  count?: number;
+  total?: number;
+  data?: T[];
+  pagination?: {
+    page?: number;
+    limit?: number;
+    total?: number;
+    totalPages?: number;
+    hasMore?: boolean;
+    nextPage?: number | null;
+  };
 };
 
 const PAGE_SIZE = 1000;
@@ -42,12 +58,29 @@ function clean(value: unknown) {
   const lower = text.toLowerCase();
 
   if (
-    ["-", "n/a", "na", "none", "null", "undefined", "not found"].includes(lower)
+    [
+      "-",
+      "n/a",
+      "na",
+      "none",
+      "null",
+      "undefined",
+      "not found",
+      "unknown",
+    ].includes(lower)
   ) {
     return "";
   }
 
   return text;
+}
+
+function cleanEmail(value: unknown) {
+  return clean(value)
+    .toLowerCase()
+    .replace(/^mailto:/, "")
+    .replace(/[<>"'(),;]+/g, "")
+    .trim();
 }
 
 function buildPaginatedEndpoint(endpoint: string, page: number, limit: number) {
@@ -65,9 +98,10 @@ function getRowIdentity(row: RawContact) {
     [
       clean(row.brandName),
       clean(row.domain),
-      clean(row.email),
+      cleanEmail(row.email),
       clean(row.fullName || row.name),
       clean(row.title),
+      clean(row.apolloPersonId),
     ]
       .filter(Boolean)
       .join("-")
@@ -91,13 +125,14 @@ function mergeUniqueRows(previousRows: RawContact[], nextRows: RawContact[]) {
 }
 
 function isBadEmail(email: string) {
-  const value = clean(email).toLowerCase();
+  const value = cleanEmail(email);
 
   if (!value) return true;
   if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value)) return true;
   if (value.endsWith(".css")) return true;
   if (value.endsWith(".js")) return true;
   if (value.includes("@11.")) return true;
+  if (value.includes("email_not_unlocked")) return true;
 
   return [
     "your@email.com",
@@ -117,7 +152,7 @@ function titleCaseName(value: string) {
 }
 
 function nameFromEmail(email: string) {
-  const local = clean(email).split("@")[0] || "";
+  const local = cleanEmail(email).split("@")[0] || "";
 
   const parts = local
     .split(/[._-]+/)
@@ -130,13 +165,13 @@ function nameFromEmail(email: string) {
   return titleCaseName(parts.join(" "));
 }
 
-function bestName(row: RawContact) {
+function getFullName(row: RawContact) {
   const firstName = clean(row.firstName);
   const lastName = clean(row.lastName);
   const fullFromParts = [firstName, lastName].filter(Boolean).join(" ");
 
   const storedName = clean(row.fullName) || clean(row.name) || fullFromParts;
-  const emailName = nameFromEmail(clean(row.email));
+  const emailName = nameFromEmail(cleanEmail(row.email));
 
   if (emailName && (!storedName || storedName.split(/\s+/).length < 2)) {
     return emailName;
@@ -145,92 +180,158 @@ function bestName(row: RawContact) {
   return storedName || emailName || "";
 }
 
-function pocNameEmail(row: RawContact) {
-  const email = clean(row.email).toLowerCase();
-  const name = bestName(row);
 
-  if (isBadEmail(email)) return name || "";
-
-  return name ? `${name} (${email})` : email;
-}
-
-function apolloStatus(row: RawContact) {
-  const email = clean(row.email).toLowerCase();
-
-  const rawText = [
-    row.emailVerified,
-    row.emailStatus,
-    row.verificationStatus,
-    row.status,
-    row.raw?.email_status,
-    row.raw?.emailStatus,
-    row.raw?.status,
-  ]
-    .map((value) => clean(value).toLowerCase())
-    .filter(Boolean)
-    .join(" ");
-
-  if (!rawText && !email) return "";
-
-  if (rawText.includes("verified")) return "Verified";
+function normalizeHunterStatus(value: unknown, row?: RawContact) {
+  const rawStatus = clean(value || "");
+  const lower = rawStatus.toLowerCase().replace(/[\s_-]+/g, " ").trim();
+  const email = cleanEmail(row?.email);
 
   if (
-    rawText.includes("revealed") ||
-    rawText.includes("found") ||
-    rawText.includes("available") ||
-    rawText.includes("valid") ||
-    (!isBadEmail(email) && email)
+    !lower ||
+    [
+      "verified",
+      "valid",
+      "ok",
+      "deliverable",
+      "accepted",
+      "accept all",
+      "acceptall",
+      "has email",
+      "hasemail",
+      "has emails",
+      "true",
+    ].includes(lower) ||
+    /^\d+$/.test(lower)
   ) {
-    return "Revealed";
+    return !isBadEmail(email) ? "Yes" : "No";
   }
 
   if (
-    rawText.includes("has email") ||
-    rawText.includes("has_email") ||
-    rawText === "true"
+    [
+      "invalid",
+      "failed",
+      "error",
+      "undeliverable",
+      "rejected",
+      "no email",
+      "no emails",
+      "no email found",
+      "not found",
+      "unavailable",
+      "false",
+    ].includes(lower)
   ) {
+    return "No";
+  }
+
+  return !isBadEmail(email) ? "Yes" : "No";
+}
+
+function normalizeStatus(value: unknown, provider: Provider, row?: RawContact) {
+  const rawStatus = clean(value || "");
+  const lower = rawStatus.toLowerCase().replace(/[\s_-]+/g, " ").trim();
+  const email = cleanEmail(row?.email);
+
+  if (!lower) {
+    if (provider === "apollo") {
+      const hasEmailFlag = [
+        row?.raw?.has_email,
+        row?.raw?.hasEmail,
+        row?.raw?.email_available,
+      ].some((item) => item === true || String(item).toLowerCase() === "true");
+
+      if (hasEmailFlag) return "Has Email";
+    }
+
+    return !isBadEmail(email)
+      ? provider === "apollo"
+        ? "Revealed"
+        : provider === "prospeo"
+          ? "Found"
+          : "Verified"
+      : "";
+  }
+
+  if (["verified", "valid", "ok", "deliverable", "accepted"].includes(lower)) {
+    return "Verified";
+  }
+
+  if (["revealed", "found", "available"].includes(lower)) {
+    return "Revealed";
+  }
+
+  if (["has email", "hasemail", "has emails", "true"].includes(lower)) {
     return "Has Email";
   }
 
   if (
-    rawText.includes("no email") ||
-    rawText.includes("no_email") ||
-    rawText.includes("not found") ||
-    rawText.includes("unavailable") ||
-    rawText === "false"
+    ["no email", "no emails", "no email found", "not found", "unavailable", "false"].includes(
+      lower
+    )
   ) {
     return "No Email";
   }
 
-  return clean(
-    row.emailVerified ||
-    row.emailStatus ||
-    row.verificationStatus ||
-    row.status
-  );
-}
+  if (["invalid", "failed", "error", "undeliverable", "rejected"].includes(lower)) {
+    return "Invalid";
+  }
 
-function regularStatus(row: RawContact) {
-  return clean(
-    row.emailStatus ||
-    row.emailVerified ||
-    row.verificationStatus ||
-    row.status
-  );
+  if (["unverified", "risky", "risky email", "accept all", "acceptall"].includes(lower)) {
+    return rawStatus;
+  }
+
+  return rawStatus;
 }
 
 function getStatus(row: RawContact, provider: Provider) {
-  if (provider === "apollo") return apolloStatus(row);
+  if (provider === "hunter") {
+    return normalizeHunterStatus(
+      row.emailStatus ||
+      row.emailVerified ||
+      row.verificationStatus ||
+      row.status ||
+      row.raw?.email_status ||
+      row.raw?.emailStatus ||
+      row.raw?.verification?.status ||
+      row.raw?.status ||
+      row.raw?.confidence,
+      row
+    );
+  }
 
-  return regularStatus(row);
+  if (provider === "apollo") {
+    return normalizeStatus(
+      row.emailVerified ||
+      row.emailStatus ||
+      row.verificationStatus ||
+      row.status ||
+      row.raw?.email_status ||
+      row.raw?.emailStatus ||
+      row.raw?.status,
+      provider,
+      row
+    );
+  }
+
+  return normalizeStatus(
+    row.emailStatus ||
+    row.emailVerified ||
+    row.verificationStatus ||
+    row.status ||
+    row.raw?.email_status ||
+    row.raw?.emailStatus ||
+    row.raw?.verification?.status ||
+    row.raw?.status,
+    provider,
+    row
+  );
 }
 
 function getSearchText(row: RawContact, provider: Provider) {
   return [
     row.brandName,
     row.domain,
-    bestName(row),
-    pocNameEmail(row),
+    getFullName(row),
     row.email,
     row.title,
     row.country,
@@ -308,7 +409,7 @@ function ClickableDomain({ value }: { value?: string }) {
 }
 
 function ClickableEmail({ value }: { value?: string }) {
-  const email = clean(value).toLowerCase();
+  const email = cleanEmail(value);
 
   if (!email || isBadEmail(email)) {
     return <span className="text-slate-300">-</span>;
@@ -324,7 +425,7 @@ function StatusBadge({ value }: { value: string }) {
 
   const lower = status.toLowerCase();
 
-  if (["verified", "valid", "ok", "deliverable"].includes(lower)) {
+  if (["yes", "verified", "valid", "ok", "deliverable"].includes(lower)) {
     return (
       <span className="inline-flex rounded-full bg-emerald-50 px-2.5 py-1 text-xs font-semibold text-emerald-700">
         {status}
@@ -332,15 +433,15 @@ function StatusBadge({ value }: { value: string }) {
     );
   }
 
-  if (["revealed", "has email", "has_email"].includes(lower)) {
+  if (["revealed", "has email", "has_email", "found", "accept all", "accept_all", "acceptall"].includes(lower)) {
     return (
       <span className="inline-flex rounded-full bg-blue-50 px-2.5 py-1 text-xs font-semibold text-blue-700">
-        {status === "has_email" ? "Has Email" : status}
+        {status === "has_email" ? "Has Email" : status === "accept_all" ? "accept_all" : status}
       </span>
     );
   }
 
-  if (["invalid", "failed", "error"].includes(lower)) {
+  if (["invalid", "failed", "error", "undeliverable"].includes(lower)) {
     return (
       <span className="inline-flex rounded-full bg-rose-50 px-2.5 py-1 text-xs font-semibold text-rose-700">
         {status}
@@ -348,7 +449,7 @@ function StatusBadge({ value }: { value: string }) {
     );
   }
 
-  if (["no email", "no_email", "unverified", "not found"].includes(lower)) {
+  if (["no", "no email", "no_email", "unverified", "not found"].includes(lower)) {
     return (
       <span className="inline-flex rounded-full bg-slate-100 px-2.5 py-1 text-xs font-semibold text-slate-600">
         {status === "no_email" ? "No Email" : status}
@@ -359,6 +460,18 @@ function StatusBadge({ value }: { value: string }) {
   return (
     <span className="inline-flex rounded-full bg-slate-100 px-2.5 py-1 text-xs font-semibold text-slate-700">
       {status}
+    </span>
+  );
+}
+
+function PlainCell({ value, strong = false }: { value?: string; strong?: boolean }) {
+  const text = clean(value);
+
+  if (!text) return <span className="text-slate-300">-</span>;
+
+  return (
+    <span className={strong ? "font-semibold text-slate-950" : "font-medium text-slate-700"}>
+      {text}
     </span>
   );
 }
@@ -401,11 +514,11 @@ export function RawContactsTable({
       }
 
       try {
-        const response = await apiGet(
+        const response = await apiGet<PaginatedResponse<RawContact>>(
           buildPaginatedEndpoint(endpoint, pageToLoad, PAGE_SIZE)
         );
 
-        const nextRows: RawContact[] = response?.data || [];
+        const nextRows = response?.data || [];
 
         setRows((previousRows) =>
           append ? mergeUniqueRows(previousRows, nextRows) : nextRows
@@ -486,7 +599,7 @@ export function RawContactsTable({
     const query = search.trim().toLowerCase();
 
     return rows.filter((row) => {
-      const email = clean(row.email).toLowerCase();
+      const email = cleanEmail(row.email);
       const rowStatus = getStatus(row, provider);
 
       const matchesSearch =
@@ -527,25 +640,10 @@ export function RawContactsTable({
   const columns = useMemo<AdminTableColumn<RawContact>[]>(() => {
     const baseColumns: AdminTableColumn<RawContact>[] = [
       {
-        id: "index",
-        header: "#",
-        align: "center",
-        widthClassName: "min-w-[70px]",
-        render: (_row, index) => (
-          <span className="text-sm font-semibold text-slate-500">
-            {index + 1}
-          </span>
-        ),
-      },
-      {
         id: "brandName",
         header: "Brand Name",
         widthClassName: "min-w-[220px]",
-        render: (row) => (
-          <span className="font-semibold text-slate-950">
-            {clean(row.brandName) || "-"}
-          </span>
-        ),
+        render: (row) => <PlainCell value={row.brandName} strong />,
       },
       {
         id: "domain",
@@ -554,20 +652,18 @@ export function RawContactsTable({
         render: (row) => <ClickableDomain value={row.domain} />,
       },
       {
-        id: "pocNameEmail",
-        header: "PoC Name (Email)",
-        widthClassName: "min-w-[280px]",
-        render: (row) => (
-          <span className="font-semibold text-slate-800">
-            {pocNameEmail(row) || "-"}
-          </span>
-        ),
-      },
-      {
-        id: "email",
-        header: "Email",
+        id: "fullName",
+        header: "Full Name",
         widthClassName: "min-w-[240px]",
-        render: (row) => <ClickableEmail value={row.email} />,
+        render: (row) => {
+          const fullName = getFullName(row);
+
+          return fullName ? (
+            <PlainCell value={fullName} />
+          ) : (
+            <span className="font-medium text-slate-700">Unknown</span>
+          );
+        },
       },
       {
         id: "title",
@@ -586,12 +682,20 @@ export function RawContactsTable({
       });
     }
 
-    baseColumns.push({
-      id: "status",
-      header: statusHeader,
-      widthClassName: "min-w-[160px]",
-      render: (row) => <StatusBadge value={getStatus(row, provider)} />,
-    });
+    baseColumns.push(
+      {
+        id: "email",
+        header: "Email",
+        widthClassName: "min-w-[240px]",
+        render: (row) => <ClickableEmail value={row.email} />,
+      },
+      {
+        id: "status",
+        header: statusHeader,
+        widthClassName: "min-w-[170px]",
+        render: (row) => <StatusBadge value={getStatus(row, provider)} />,
+      }
+    );
 
     return baseColumns;
   }, [includeCountry, provider, statusHeader]);
@@ -616,7 +720,7 @@ export function RawContactsTable({
             label="Search"
             value={search}
             onChange={setSearch}
-            placeholder="Search brand, domain, PoC, email, title..."
+            placeholder="Search brand, domain, full name, email, title..."
           />
 
           <FilterSelect
@@ -678,7 +782,7 @@ export function RawContactsTable({
         data={filteredRows}
         columns={columns}
         rowKey={(row, index) =>
-          row._id || `${row.brandName}-${row.email}-${index}`
+          row._id || `${row.brandName}-${row.email}-${row.apolloPersonId}-${index}`
         }
         loading={loading}
         loadingRows={8}
@@ -693,7 +797,8 @@ export function RawContactsTable({
         containerClassName="rounded-xl shadow-none"
       />
 
-      <div className="flex flex-col items-center justify-center p-4">
+      <div className="flex flex-col items-center justify-center">
+
         <Button
           type="button"
           onClick={handleLoadMore}

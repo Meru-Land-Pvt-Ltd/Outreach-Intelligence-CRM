@@ -104,6 +104,11 @@ export const env = {
   prospeoEnrichPersonEndpoint:
     process.env.PROSPEO_ENRICH_PERSON_ENDPOINT || "/enrich-person",
   prospeoRequestDelayMs: numberValue(process.env.PROSPEO_REQUEST_DELAY_MS, 1500),
+  prospeoOnlyVerifiedEmail: booleanValue(
+    process.env.PROSPEO_ONLY_VERIFIED_EMAIL,
+    false
+  ),
+  prospeoSearchPages: numberValue(process.env.PROSPEO_SEARCH_PAGES, 3),
 
   maxVideosPerSeed: numberValue(process.env.MAX_VIDEOS_PER_SEED, 20),
   maxChannelsPerSeed: numberValue(process.env.MAX_CHANNELS_PER_SEED, 50),
