@@ -30,7 +30,7 @@ type EmailDiscoveryRow = {
   updatedAt?: string;
 };
 
-const PAGE_SIZE = 1000;
+const PAGE_SIZE = 100;
 const ALL_VALUE = "All";
 
 function clean(value: unknown) {
