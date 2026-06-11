@@ -111,9 +111,8 @@ async function rebuildBrandMapForSeed(seedBrandId: string) {
     seedBrandId
   }).lean();
 
-  await BrandMap.deleteMany({
-    seedBrandId
-  });
+  // Do not clear Brand Map before rebuilding one seed.
+  // Rebuild should update/append rows instead of wiping existing data.
 
   const validVideos = videos.filter((video: any) => {
     return !isInvalidValue(video.sponsorBrand);
@@ -257,7 +256,8 @@ export async function rebuildAllBrandMaps(req: Request, res: Response) {
   try {
     const seedBrandIds = await RawYoutubeVideo.distinct("seedBrandId");
 
-    await BrandMap.deleteMany({});
+    // Do not clear all Brand Map rows.
+    // Rebuild-all should update/append rows instead of wiping existing data.
 
     const results = [];
 

@@ -323,6 +323,38 @@ function ClickableMultilineCell({
   );
 }
 
+function PlainMultilineCell({
+  value,
+  strong = false,
+}: {
+  value: string;
+  strong?: boolean;
+}) {
+  const lines = splitLines(value);
+
+  if (lines.length === 0) {
+    return <span className="text-slate-300">-</span>;
+  }
+
+  return (
+    <div className="space-y-1">
+      {lines.map((line, index) => (
+        <div
+          key={`${line}-${index}`}
+          className={cn(
+            "whitespace-pre-wrap break-words text-xs leading-5",
+            strong
+              ? "font-semibold text-slate-900"
+              : "font-medium text-slate-600"
+          )}
+        >
+          {line}
+        </div>
+      ))}
+    </div>
+  );
+}
+
 export default function EmailDiscoveryPage() {
   const [rows, setRows] = useState<EmailDiscoveryRow[]>([]);
   const [loading, setLoading] = useState(true);
@@ -511,40 +543,40 @@ export default function EmailDiscoveryPage() {
         ),
       },
       {
-        id: "totalEmails",
-        header: "Total Emails",
-        widthClassName: "min-w-[260px]",
-        render: (row) => (
-          <ClickableMultilineCell
-            value={displayEmailValue(row.totalEmails)}
-            strong
-          />
-        ),
-      },
-      {
-        id: "hunter",
-        header: "Hunter",
-        widthClassName: "min-w-[240px]",
-        render: (row) => (
-          <ClickableMultilineCell value={displayEmailValue(row.hunter)} />
-        ),
-      },
-      {
-        id: "apollo",
-        header: "Apollo",
-        widthClassName: "min-w-[240px]",
-        render: (row) => (
-          <ClickableMultilineCell value={displayEmailValue(row.apollo)} />
-        ),
-      },
-      {
-        id: "prospeo",
-        header: "Prospeo",
-        widthClassName: "min-w-[240px]",
-        render: (row) => (
-          <ClickableMultilineCell value={displayEmailValue(row.prospeo)} />
-        ),
-      },
+  id: "totalEmails",
+  header: "Total Emails",
+  widthClassName: "min-w-[260px]",
+  render: (row) => (
+    <PlainMultilineCell
+      value={displayEmailValue(row.totalEmails)}
+      strong
+    />
+  ),
+},
+{
+  id: "hunter",
+  header: "Hunter",
+  widthClassName: "min-w-[240px]",
+  render: (row) => (
+    <PlainMultilineCell value={displayEmailValue(row.hunter)} />
+  ),
+},
+{
+  id: "apollo",
+  header: "Apollo",
+  widthClassName: "min-w-[240px]",
+  render: (row) => (
+    <PlainMultilineCell value={displayEmailValue(row.apollo)} />
+  ),
+},
+{
+  id: "prospeo",
+  header: "Prospeo",
+  widthClassName: "min-w-[240px]",
+  render: (row) => (
+    <PlainMultilineCell value={displayEmailValue(row.prospeo)} />
+  ),
+},
     ],
     []
   );

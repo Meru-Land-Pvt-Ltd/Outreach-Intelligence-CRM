@@ -244,9 +244,8 @@ export async function buildBrandMapForSeedBrand(seedBrandId: string) {
     seedBrandId
   }).lean();
 
-  await BrandMap.deleteMany({
-    seedBrandId
-  });
+  // Do not clear Brand Map on every crawl.
+  // New crawl results should be appended/updated below existing rows.
 
   const validVideos = videos.filter((video: any) => {
     if (isInvalidValue(video.sponsorBrand)) return false;
@@ -372,34 +371,49 @@ export async function buildBrandMapForSeedBrand(seedBrandId: string) {
 
     const foundVia = brandVideos[0]?.seedBrandName || "";
 
-    await BrandMap.create({
-      seedBrandId,
-      seedBrandName: foundVia,
+    await BrandMap.findOneAndUpdate(
+      {
+        seedBrandId,
+        domain
+      },
+      {
+        $set: {
+          seedBrandId,
+          seedBrandName: foundVia,
 
-      brandName,
-      foundVia,
-      channelCount,
-      channelNames,
-      mostRecentSponsorshipDate,
-      recencyTag: getRecencyTag(mostRecentSponsorshipDate),
-      niche,
-      domain,
+          brandName,
+          foundVia,
+          channelCount,
+          channelNames,
+          mostRecentSponsorshipDate,
+          recencyTag: getRecencyTag(mostRecentSponsorshipDate),
+          niche,
+          domain,
 
-      productNames,
-      sourceVideoIds,
-      sourceVideoUrls,
+          productNames,
+          sourceVideoIds,
+          sourceVideoUrls,
 
-      status: "domain_found",
-      isExcluded: false,
+          status: "domain_found",
+          isExcluded: false,
 
-      raw: {
-        videoCount: brandVideos.length,
-        originalSponsorBrands: unique(
-          brandVideos.map((video: any) => video.sponsorBrand)
-        ),
-        foundViaSeedBrand: foundVia
+          raw: {
+            videoCount: brandVideos.length,
+            originalSponsorBrands: unique(
+              brandVideos.map((video: any) => video.sponsorBrand)
+            ),
+            foundViaSeedBrand: foundVia
+          }
+        },
+        $setOnInsert: {
+          createdAt: new Date()
+        }
+      },
+      {
+        upsert: true,
+        new: true
       }
-    });
+    );
 
     existingDomains[domain] = true;
 
