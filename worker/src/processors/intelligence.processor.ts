@@ -27,9 +27,15 @@ const JobLogSchema = new mongoose.Schema(
     status: String,
     currentStep: String,
     progress: Number,
-    error: String
+    message: String,
+    error: String,
+    startedAt: Date,
+    completedAt: Date,
+    totalFound: Number,
+    result: Object,
+    raw: Object
   },
-  { timestamps: true }
+  { timestamps: true, strict: false }
 );
 
 const SeedBrandSchema = new mongoose.Schema(
@@ -57,7 +63,8 @@ async function updateProgress(
   job: Job,
   jobId: string,
   currentStep: string,
-  progress: number
+  progress: number,
+  extraSet: Record<string, any> = {}
 ) {
   console.log("JOB STEP:", currentStep);
 
@@ -73,7 +80,9 @@ async function updateProgress(
       $set: {
         status: "running",
         currentStep,
-        progress
+        message: currentStep,
+        progress,
+        ...extraSet
       }
     },
     {
@@ -83,14 +92,21 @@ async function updateProgress(
   );
 }
 
-async function markJobCompleted(jobId: string, currentStep: string) {
+async function markJobCompleted(
+  jobId: string,
+  currentStep: string,
+  result: Record<string, any> = {}
+) {
   await JobLog.findOneAndUpdate(
     { jobId },
     {
       $set: {
         status: "completed",
         currentStep,
+        message: currentStep,
         progress: 100,
+        completedAt: new Date(),
+        result,
         error: ""
       }
     },
@@ -102,13 +118,17 @@ async function markJobCompleted(jobId: string, currentStep: string) {
 }
 
 async function markJobFailed(jobId: string, error: any) {
+  const message = error?.message || String(error);
+
   await JobLog.findOneAndUpdate(
     { jobId },
     {
       $set: {
         status: "failed",
         currentStep: "PIPELINE_FAILED",
-        error: error?.message || String(error)
+        message,
+        completedAt: new Date(),
+        error: message
       }
     },
     {
@@ -237,7 +257,9 @@ export async function intelligenceProcessor(job: Job) {
       const result = await crawlLatestReviewVideos();
 
       await updateProgress(job, jobId, "REFRESH_LATEST_REVIEWS_DONE", 95);
-      await markJobCompleted(jobId, "REFRESH_LATEST_REVIEWS_COMPLETE");
+      await markJobCompleted(jobId, "REFRESH_LATEST_REVIEWS_COMPLETE", {
+        latestReviews: result
+      });
 
       return {
         success: true,
@@ -409,7 +431,16 @@ export async function intelligenceProcessor(job: Job) {
       }
     });
 
-    await markJobCompleted(jobId, "MASTER_PIPELINE_COMPLETE");
+    await markJobCompleted(jobId, "MASTER_PIPELINE_COMPLETE", {
+      crawlResult,
+      aiResult,
+      brandMapResult,
+      nicheResult,
+      domainResult,
+      emailDiscoveryResult,
+      verificationResult,
+      instantlyExportResult
+    });
 
     console.log("====================================");
     console.log("MASTER PIPELINE COMPLETED");
