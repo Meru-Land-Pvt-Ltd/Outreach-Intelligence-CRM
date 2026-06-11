@@ -203,7 +203,7 @@ async function enrichProspeoPerson(person: any, company: any, domain: string) {
     await sleep(env.prospeoRequestDelayMs || 1500);
 
     return await postProspeo(env.prospeoEnrichPersonEndpoint || "/enrich-person", {
-      only_verified_email: Boolean(env.prospeoOnlyVerifiedEmail),
+      only_verified_email: false,
       enrich_mobile: false,
       data
     });
@@ -231,14 +231,6 @@ function buildSearchPayload(
     },
     max_person_per_company: Math.min(Number(env.maxContactsPerBrand || 20), 25)
   };
-  if (env.prospeoOnlyVerifiedEmail) {
-    filters.person_contact_details = {
-      email: ["VERIFIED"],
-      operator: "OR",
-      hide_people_with_details_already_revealed: false
-    };
-  }
-
   if (includeTitleFilter) {
     filters.person_job_title = {
       include: getTargetTitles(),
