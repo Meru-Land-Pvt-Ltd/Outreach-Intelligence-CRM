@@ -409,7 +409,6 @@ export async function crawlSeedBrandYoutubeVideos(input: CrawlInput) {
           youtubeCategoryId: snippet.categoryId || "",
           searchKeyword: source?.seedSearchKeyword || "",
           relevanceStatus: "influencer-channel-video",
-          isSponsored: false,
 
           raw: {
             video,
