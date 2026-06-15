@@ -1,6 +1,11 @@
 import { env } from "../config/env";
 import { RawYoutubeVideo } from "../models/RawYoutubeVideo.model";
 import {
+  blankRawVideoAiFieldFilter,
+  buildRawVideoFieldSet,
+  inferRawVideoFields
+} from "./rawVideoFieldInference.service";
+import {
   searchYoutubeVideos,
   getYoutubeVideoDetails,
   getYoutubeChannelDetails
@@ -348,6 +353,24 @@ export async function crawlSeedBrandYoutubeVideos(input: CrawlInput) {
     const source = videoIdToSource.get(video.id);
     const videoUrl = "https://www.youtube.com/watch?v=" + video.id;
 
+    const rawVideoForInference = {
+      seedBrandId: input.seedBrandId,
+      seedBrandName: input.brandName,
+      channelName: snippet.channelTitle || "",
+      channelId: snippet.channelId || "",
+      videoUrl,
+      videoTitle: snippet.title || "",
+      videoDescription: String(snippet.description || "").substring(0, 2000),
+      durationSec: parseYoutubeDurationToSeconds(contentDetails.duration),
+      raw: {
+        foundViaSeedBrand: input.brandName,
+        seedProductName: input.productName || ""
+      }
+    };
+
+    const inferredFields = inferRawVideoFields(rawVideoForInference);
+    const inferredFieldSet = buildRawVideoFieldSet(inferredFields);
+
     await RawYoutubeVideo.updateOne(
       {
         seedBrandId: input.seedBrandId,
@@ -400,19 +423,31 @@ export async function crawlSeedBrandYoutubeVideos(input: CrawlInput) {
           }
         },
         $setOnInsert: {
-          channelCategory: "",
-          sponsorBrand: "",
-          promoCode: "",
-          productNameWithModel: "",
-          sponsorshipType: "",
+          ...inferredFieldSet,
           aiProcessed: false,
           analysisStatus: "pending",
-          analysisError: "",
-          analyzedAt: undefined
+          analysisError: ""
         }
       },
       {
         upsert: true
+      }
+    );
+
+    await RawYoutubeVideo.updateOne(
+      {
+        seedBrandId: input.seedBrandId,
+        videoId: video.id,
+        ...blankRawVideoAiFieldFilter()
+      },
+      {
+        $set: {
+          ...inferredFieldSet,
+          aiProcessed: false,
+          analysisStatus: "pending",
+          analysisError: "",
+          analyzedAt: new Date()
+        }
       }
     );
 
