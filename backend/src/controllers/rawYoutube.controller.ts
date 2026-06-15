@@ -30,12 +30,22 @@ export async function getRawYoutubeVideos(req: Request, res: Response) {
 
     const videos = await RawYoutubeVideo.find(filter)
       .sort({ addedOn: -1, publishedDate: -1, createdAt: -1 })
-      .limit(limit);
+      .limit(limit)
+      .lean();
+
+    const data = videos.map((video: any) => ({
+      ...video,
+      channelCategory: video.channelCategory || video.category || "",
+      category: video.category || video.channelCategory || "",
+      productNameWithModel:
+        video.productNameWithModel || video.productName || "",
+      productName: video.productName || video.productNameWithModel || ""
+    }));
 
     res.json({
       success: true,
-      count: videos.length,
-      data: videos
+      count: data.length,
+      data
     });
   } catch (error: any) {
     res.status(500).json({

@@ -314,3 +314,111 @@ export function blankRawVideoAiFieldFilter() {
     ]
   };
 }
+
+
+type RawVideoFieldSet = ReturnType<typeof buildRawVideoFieldSet>;
+
+type RawVideoFieldKey = keyof RawVideoFieldSet;
+
+const FIELD_KEYS: RawVideoFieldKey[] = [
+  "channelCategory",
+  "category",
+  "sponsorBrand",
+  "promoCode",
+  "productNameWithModel",
+  "productName",
+  "sponsorshipType"
+];
+
+function isWeakCategoryValue(value: any) {
+  return cleanRawVideoValue(value).toLowerCase() === "uncategorized";
+}
+
+function isActualPromoCode(value: any) {
+  const text = cleanRawVideoValue(value).toLowerCase();
+
+  return Boolean(text && !["-", "n/a", "na", "none", "unknown"].includes(text));
+}
+
+function shouldFillRawVideoField(
+  currentValue: any,
+  nextValue: any,
+  fieldName: RawVideoFieldKey
+) {
+  const current = cleanRawVideoValue(currentValue);
+  const next = cleanRawVideoValue(nextValue);
+
+  if (!next) return false;
+
+  // First crawl should never leave visible raw-data columns blank. It is safe to
+  // fill an actually blank cell with a deterministic fallback such as "N/A" or
+  // "Uncategorized". Later crawls/AI can replace those weak fallbacks with a
+  // better value, but a good existing value must never be overwritten by a weak one.
+  if (isBlankishRawVideoValue(currentValue)) return true;
+
+  if (fieldName === "promoCode") {
+    if (!isActualPromoCode(currentValue) && isActualPromoCode(nextValue)) return true;
+    return false;
+  }
+
+  if (fieldName === "channelCategory" || fieldName === "category") {
+    if (isWeakCategoryValue(currentValue) && !isWeakCategoryValue(nextValue)) return true;
+    return false;
+  }
+
+  if (isMissingMeaningfulRawVideoValue(nextValue)) return false;
+
+  if (isMissingMeaningfulRawVideoValue(currentValue)) return true;
+
+  return false;
+}
+
+function getExistingRawVideoValue(existing: any, key: RawVideoFieldKey) {
+  if (key === "category") {
+    return existing?.category || existing?.channelCategory;
+  }
+
+  if (key === "productName") {
+    return existing?.productName || existing?.productNameWithModel;
+  }
+
+  return existing?.[key];
+}
+
+export function buildMissingRawVideoFieldSet(
+  existing: any,
+  fields: RawVideoExtractedFields
+) {
+  const incoming = buildRawVideoFieldSet(fields);
+  const update: Partial<RawVideoFieldSet> = {};
+
+  for (const key of FIELD_KEYS) {
+    if (shouldFillRawVideoField(getExistingRawVideoValue(existing, key), incoming[key], key)) {
+      (update as any)[key] = (incoming as any)[key];
+    }
+  }
+
+  if (update.channelCategory && !update.category) {
+    update.category = update.channelCategory;
+  }
+
+  if (update.category && !update.channelCategory) {
+    update.channelCategory = update.category;
+  }
+
+  if (update.productNameWithModel && !update.productName) {
+    update.productName = update.productNameWithModel;
+  }
+
+  if (update.productName && !update.productNameWithModel) {
+    update.productNameWithModel = update.productName;
+  }
+
+  const sponsorBrand = update.sponsorBrand || existing?.sponsorBrand || incoming.sponsorBrand;
+
+  if ("sponsorBrand" in update || typeof existing?.isSponsored !== "boolean") {
+    update.isSponsored = isValidSponsorBrand(sponsorBrand) as any;
+  }
+
+  return update;
+}

@@ -102,6 +102,75 @@ function isActiveCrawlStatus(status: any) {
   return ["queued", "running", "paused"].includes(normalizeJobStatus(status));
 }
 
+function getActiveJobStaleMs() {
+  const hours = Number(process.env.CRAWL_ACTIVE_JOB_STALE_HOURS || 12);
+  const safeHours = Number.isFinite(hours) && hours > 0 ? hours : 12;
+
+  return safeHours * 60 * 60 * 1000;
+}
+
+function getJobCreatedTime(job: any, log: any) {
+  const values = [
+    job?.timestamp,
+    log?.startedAt,
+    log?.createdAt,
+    log?.updatedAt
+  ];
+
+  for (const value of values) {
+    const time = typeof value === "number" ? value : new Date(value || 0).getTime();
+
+    if (Number.isFinite(time) && time > 0) {
+      return time;
+    }
+  }
+
+  return Date.now();
+}
+
+function isStaleQueuedCrawl(job: any, log: any, state: any, status: any) {
+  if (normalizeJobStatus(status) !== "queued") return false;
+  if (state === "active") return false;
+
+  return Date.now() - getJobCreatedTime(job, log) > getActiveJobStaleMs();
+}
+
+async function stopAndRemoveStaleQueueJob(job: any, log: any) {
+  const jobId = String(job?.id || log?.jobId || "");
+
+  if (!jobId) return;
+
+  const seedBrandId = getJobLogSeedBrandId(log, job?.data || {});
+
+  await JobLog.findOneAndUpdate(
+    { jobId },
+    {
+      $set: {
+        status: "stopped",
+        currentStep: "STALE_QUEUE_REMOVED",
+        message: "Old queued crawl was removed from Active. Start again to run from step 0.",
+        completedAt: new Date(),
+        error: ""
+      },
+      $unset: {
+        pausedAt: ""
+      }
+    },
+    {
+      upsert: true,
+      returnDocument: "after"
+    }
+  );
+
+  await updateSeedBrandStatus(seedBrandId, "stopped");
+
+  try {
+    await job?.remove();
+  } catch {
+    // Ignore stale queue cleanup races.
+  }
+}
+
 function getObjectIdString(value: any) {
   const text = cleanText(value?._id || value);
 
@@ -304,22 +373,75 @@ export async function runIntelligenceJob(req: Request, res: Response) {
       100
     );
 
-    const existingJob = existingActiveJobs.find(
+    const existingSameSeedJobs = existingActiveJobs.filter(
       (job) => String(job.data?.seedBrandId) === seedBrandId
     );
 
-    if (existingJob) {
-      return res.status(200).json({
-        success: true,
-        jobId: String(existingJob.id),
-        seedBrandId,
-        data: {
-          jobId: String(existingJob.id),
-          seedBrandId,
-          status: "queued",
-          message: "Job already active or queued"
+    if (existingSameSeedJobs.length > 0) {
+      const existingJobIds = existingSameSeedJobs.map((job) => String(job.id));
+      const existingLogs = await JobLog.find({
+        jobId: {
+          $in: existingJobIds
         }
-      });
+      }).lean();
+      const existingLogByJobId = new Map<string, any>();
+
+      for (const log of existingLogs) {
+        existingLogByJobId.set(String(log.jobId), log);
+      }
+
+      for (const existingJob of existingSameSeedJobs) {
+        const existingJobId = String(existingJob.id);
+        const state = await existingJob.getState();
+        const log = existingLogByJobId.get(existingJobId);
+        const status = normalizeJobStatus(log?.status || state);
+
+        // A fresh Start/Add should never resume a paused/stopped/stale job. Only
+        // an actually running job is kept to avoid duplicate simultaneous crawls.
+        // Paused jobs must be continued only from the Resume button.
+        if (state === "active" && status === "running") {
+          return res.status(200).json({
+            success: true,
+            jobId: existingJobId,
+            seedBrandId,
+            data: {
+              jobId: existingJobId,
+              seedBrandId,
+              status: "running",
+              message: "Job already running"
+            }
+          });
+        }
+
+        await JobLog.findOneAndUpdate(
+          { jobId: existingJobId },
+          {
+            $set: {
+              status: "stopped",
+              currentStep: "REPLACED_BY_FRESH_START",
+              message: "Old queued/paused crawl replaced by a fresh start.",
+              completedAt: new Date(),
+              error: ""
+            },
+            $unset: {
+              pausedAt: ""
+            }
+          },
+          {
+            upsert: true,
+            returnDocument: "after"
+          }
+        );
+
+        if (state !== "active") {
+          try {
+            await existingJob.remove();
+          } catch {
+            // If BullMQ state changed while replacing, JobLog status still keeps
+            // the old job hidden/stopped and the worker will honor it at checkpoint.
+          }
+        }
+      }
     }
 
     const job = await intelligenceQueue.add(
@@ -704,6 +826,11 @@ export async function getActiveIntelligenceJobs(req: Request, res: Response) {
         if (log) {
           const status = normalizeJobStatus(log.status || state);
 
+          if (isStaleQueuedCrawl(job, log, state, status)) {
+            await stopAndRemoveStaleQueueJob(job, log);
+            return null;
+          }
+
           if (!isActiveCrawlStatus(status)) {
             if (job && state !== "active") {
               try {
@@ -725,6 +852,11 @@ export async function getActiveIntelligenceJobs(req: Request, res: Response) {
         }
 
         const status = normalizeJobStatus(state);
+
+        if (isStaleQueuedCrawl(job, log, state, status)) {
+          await stopAndRemoveStaleQueueJob(job, log);
+          return null;
+        }
 
         if (!isActiveCrawlStatus(status)) {
           return null;

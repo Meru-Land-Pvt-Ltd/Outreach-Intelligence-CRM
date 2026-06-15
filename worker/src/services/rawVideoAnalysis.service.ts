@@ -2,7 +2,7 @@ import { RawYoutubeVideo } from "../models/RawYoutubeVideo.model";
 import { buildRawVideoAnalysisPrompt } from "../prompts/rawVideoAnalysis.prompt";
 import { callOpenAIText } from "./ai.service";
 import {
-  buildRawVideoFieldSet,
+  buildMissingRawVideoFieldSet,
   inferRawVideoFields
 } from "./rawVideoFieldInference.service";
 
@@ -59,7 +59,7 @@ function parseOpenAIResponse(text: string): ParsedLine[] {
 
 function buildSet(video: any, item: ParsedLine) {
   const inferredFields = inferRawVideoFields(video, item);
-  const fieldSet = buildRawVideoFieldSet(inferredFields);
+  const fieldSet = buildMissingRawVideoFieldSet(video, inferredFields);
 
   return {
     ...fieldSet,
@@ -107,7 +107,7 @@ async function analyzeBatch(videos: any[]) {
 
     await RawYoutubeVideo.findByIdAndUpdate(video._id, {
       $set: {
-        ...buildRawVideoFieldSet(inferredFields),
+        ...buildMissingRawVideoFieldSet(video, inferredFields),
         aiProcessed: true,
         analysisStatus: "fallback_completed",
         analysisError: "OpenAI response did not include this row; fallback fields applied",
@@ -188,7 +188,7 @@ export async function analyzeUnprocessedRawVideos(seedBrandId: string) {
 
           await RawYoutubeVideo.findByIdAndUpdate(video._id, {
             $set: {
-              ...buildRawVideoFieldSet(inferredFields),
+              ...buildMissingRawVideoFieldSet(video, inferredFields),
               aiProcessed: true,
               analysisStatus: "fallback_completed",
               analysisError: "OpenAI response parsed zero rows; fallback fields applied",
@@ -208,7 +208,7 @@ export async function analyzeUnprocessedRawVideos(seedBrandId: string) {
 
         await RawYoutubeVideo.findByIdAndUpdate(video._id, {
           $set: {
-            ...buildRawVideoFieldSet(inferredFields),
+            ...buildMissingRawVideoFieldSet(video, inferredFields),
             aiProcessed: true,
             analysisStatus: "fallback_completed",
             analysisError:

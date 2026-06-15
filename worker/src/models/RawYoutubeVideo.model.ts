@@ -23,14 +23,13 @@ const RawYoutubeVideoSchema = new mongoose.Schema(
     subscriberCount: Number,
     channelCountry: String,
     channelCategory: String,
+    category: String,
     sponsorBrand: String,
     promoCode: String,
     productNameWithModel: String,
+    productName: String,
     sponsorshipType: String,
-    aiProcessed: {
-      type: Boolean,
-      default: false
-    },
+    aiProcessed: Boolean,
     analysisStatus: String,
     analysisError: String,
     analyzedAt: Date,

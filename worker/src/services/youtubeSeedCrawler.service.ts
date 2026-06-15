@@ -1,7 +1,7 @@
 import { env } from "../config/env";
 import { RawYoutubeVideo } from "../models/RawYoutubeVideo.model";
 import {
-  blankRawVideoAiFieldFilter,
+  buildMissingRawVideoFieldSet,
   buildRawVideoFieldSet,
   inferRawVideoFields
 } from "./rawVideoFieldInference.service";
@@ -433,22 +433,33 @@ export async function crawlSeedBrandYoutubeVideos(input: CrawlInput) {
       }
     );
 
-    await RawYoutubeVideo.updateOne(
-      {
-        seedBrandId: input.seedBrandId,
-        videoId: video.id,
-        ...blankRawVideoAiFieldFilter()
-      },
-      {
-        $set: {
-          ...inferredFieldSet,
-          aiProcessed: false,
-          analysisStatus: "pending",
-          analysisError: "",
-          analyzedAt: new Date()
-        }
-      }
+    const existingRawVideo = await RawYoutubeVideo.findOne({
+      seedBrandId: input.seedBrandId,
+      videoId: video.id
+    }).lean();
+
+    const missingFieldSet = buildMissingRawVideoFieldSet(
+      existingRawVideo,
+      inferredFields
     );
+
+    if (Object.keys(missingFieldSet).length > 0) {
+      await RawYoutubeVideo.updateOne(
+        {
+          seedBrandId: input.seedBrandId,
+          videoId: video.id
+        },
+        {
+          $set: {
+            ...missingFieldSet,
+            aiProcessed: false,
+            analysisStatus: "pending",
+            analysisError: "",
+            analyzedAt: new Date()
+          }
+        }
+      );
+    }
 
     saved += 1;
   }
