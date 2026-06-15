@@ -379,12 +379,6 @@ export async function crawlSeedBrandYoutubeVideos(input: CrawlInput) {
           subscriberCount,
           channelCountry: channel?.snippet?.country || "",
 
-          channelCategory: "",
-          sponsorBrand: "",
-          promoCode: "",
-          productNameWithModel: "",
-          sponsorshipType: "",
-
           videoId: video.id,
           channelUrl: snippet.channelId
             ? "https://www.youtube.com/channel/" + snippet.channelId
@@ -404,6 +398,17 @@ export async function crawlSeedBrandYoutubeVideos(input: CrawlInput) {
             seedChannelName: source?.channelName || "",
             seedChannelId: source?.channelId || ""
           }
+        },
+        $setOnInsert: {
+          channelCategory: "",
+          sponsorBrand: "",
+          promoCode: "",
+          productNameWithModel: "",
+          sponsorshipType: "",
+          aiProcessed: false,
+          analysisStatus: "pending",
+          analysisError: "",
+          analyzedAt: undefined
         }
       },
       {

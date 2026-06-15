@@ -1,4 +1,5 @@
 import { RawYoutubeVideo } from "../models/RawYoutubeVideo.model";
+import { env } from "../config/env";
 import { buildRawVideoAnalysisPrompt } from "../prompts/rawVideoAnalysis.prompt";
 import { callOpenAIText } from "./ai.service";
 
@@ -15,6 +16,15 @@ function normalizeCell(value: any) {
   return String(value || "").trim();
 }
 
+function normalizeAiValue(value: any, fallback = "N/A") {
+  const text = normalizeCell(value)
+    .replace(/^[-*\s]+/, "")
+    .replace(/\*\*/g, "")
+    .trim();
+
+  return text || fallback;
+}
+
 function isValidSponsorBrand(value: any) {
   const brand = normalizeCell(value).toLowerCase();
 
@@ -28,6 +38,18 @@ function isValidSponsorBrand(value: any) {
   return true;
 }
 
+function parseVideoNumber(value: any) {
+  const match = normalizeCell(value).match(/(?:video\s*)?(\d+)/i);
+
+  if (!match) return 0;
+
+  const parsed = Number(match[1]);
+
+  if (!parsed || Number.isNaN(parsed)) return 0;
+
+  return parsed;
+}
+
 function parseOpenAIResponse(text: string): ParsedLine[] {
   const lines = text
     .split("\n")
@@ -37,21 +59,34 @@ function parseOpenAIResponse(text: string): ParsedLine[] {
   const parsed: ParsedLine[] = [];
 
   for (const line of lines) {
-    const parts = line.split("|").map((part) => part.trim());
+    const lower = line.toLowerCase();
+
+    if (lower.includes("videonumber") || lower.includes("channel category")) {
+      continue;
+    }
+
+    if (/^\|?\s*-+\s*(\|\s*-+\s*)+\|?$/.test(line)) {
+      continue;
+    }
+
+    const parts = line
+      .split("|")
+      .map((part) => normalizeAiValue(part, ""))
+      .filter(Boolean);
 
     if (parts.length < 6) continue;
 
-    const videoNumber = Number(parts[0]);
+    const videoNumber = parseVideoNumber(parts[0]);
 
-    if (!videoNumber || Number.isNaN(videoNumber)) continue;
+    if (!videoNumber) continue;
 
     parsed.push({
       videoNumber,
-      channelCategory: parts[1] || "",
-      sponsorBrand: parts[2] || "",
-      promoCode: parts[3] || "",
-      productNameWithModel: parts[4] || "",
-      sponsorshipType: parts[5] || ""
+      channelCategory: normalizeAiValue(parts[1], "Uncategorized"),
+      sponsorBrand: normalizeAiValue(parts[2]),
+      promoCode: normalizeAiValue(parts[3]),
+      productNameWithModel: normalizeAiValue(parts[4]),
+      sponsorshipType: normalizeAiValue(parts[5])
     });
   }
 
@@ -69,13 +104,31 @@ async function analyzeBatch(videos: any[]) {
   const prompt = buildRawVideoAnalysisPrompt(batch);
   const aiText = await callOpenAIText(prompt);
   const parsed = parseOpenAIResponse(aiText);
-
-  let processed = 0;
+  const parsedByVideoNumber = new Map<number, ParsedLine>();
 
   for (const item of parsed) {
-    const video = videos[item.videoNumber - 1];
+    parsedByVideoNumber.set(item.videoNumber, item);
+  }
 
-    if (!video) continue;
+  let processed = 0;
+  let missed = 0;
+
+  for (let index = 0; index < videos.length; index++) {
+    const video = videos[index];
+    const item = parsedByVideoNumber.get(index + 1);
+
+    if (!item) {
+      missed += 1;
+
+      await RawYoutubeVideo.findByIdAndUpdate(video._id, {
+        $set: {
+          analysisStatus: "pending_retry",
+          analysisError: "AI response did not include this video number"
+        }
+      });
+
+      continue;
+    }
 
     await RawYoutubeVideo.findByIdAndUpdate(video._id, {
       $set: {
@@ -84,7 +137,11 @@ async function analyzeBatch(videos: any[]) {
         sponsorBrand: item.sponsorBrand,
         promoCode: item.promoCode,
         productNameWithModel: item.productNameWithModel,
-        sponsorshipType: item.sponsorshipType
+        sponsorshipType: item.sponsorshipType,
+        aiProcessed: true,
+        analysisStatus: "completed",
+        analysisError: "",
+        analyzedAt: new Date()
       }
     });
 
@@ -93,29 +150,34 @@ async function analyzeBatch(videos: any[]) {
 
   return {
     processed,
+    missed,
     rawResponse: aiText
   };
 }
 
 export async function analyzeUnprocessedRawVideos(seedBrandId: string) {
-  const batchSize = 3;
-  const maxTotalToAnalyze = 30;
+  const batchSize = Math.max(1, env.rawVideoAnalysisBatchSize || 5);
+  const maxTotalToAnalyze = Math.max(1, env.rawVideoAnalysisLimit || 1000);
 
   let totalProcessed = 0;
+  let totalMissed = 0;
   let totalBatches = 0;
   const rawResponses: string[] = [];
 
-  while (totalProcessed < maxTotalToAnalyze) {
+  while (totalProcessed + totalMissed < maxTotalToAnalyze) {
+    const remaining = maxTotalToAnalyze - totalProcessed - totalMissed;
+
     const videos = await RawYoutubeVideo.find({
       seedBrandId,
       $or: [
+        { aiProcessed: { $ne: true } },
         { sponsorBrand: { $exists: false } },
         { sponsorBrand: "" },
         { channelCategory: "" }
       ]
     })
       .sort({ publishedDate: -1 })
-      .limit(batchSize);
+      .limit(Math.min(batchSize, remaining));
 
     if (videos.length === 0) {
       break;
@@ -124,17 +186,20 @@ export async function analyzeUnprocessedRawVideos(seedBrandId: string) {
     const result = await analyzeBatch(videos);
 
     totalProcessed += result.processed;
+    totalMissed += result.missed;
     totalBatches += 1;
     rawResponses.push(result.rawResponse);
 
-    if (result.processed === 0) {
+    if (result.processed === 0 && result.missed === 0) {
       break;
     }
   }
 
   return {
     processed: totalProcessed,
+    missed: totalMissed,
     totalBatches,
+    limit: maxTotalToAnalyze,
     rawResponse: rawResponses.join("\n\n---BATCH---\n\n")
   };
 }

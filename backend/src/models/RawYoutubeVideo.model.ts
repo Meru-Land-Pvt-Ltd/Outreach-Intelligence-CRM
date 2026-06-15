@@ -27,6 +27,13 @@ const RawYoutubeVideoSchema = new mongoose.Schema(
     promoCode: String,
     productNameWithModel: String,
     sponsorshipType: String,
+    aiProcessed: {
+      type: Boolean,
+      default: false
+    },
+    analysisStatus: String,
+    analysisError: String,
+    analyzedAt: Date,
 
     videoId: String,
     channelUrl: String,

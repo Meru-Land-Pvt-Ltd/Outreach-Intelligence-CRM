@@ -91,7 +91,23 @@ function getAddedOn(video: RawYoutubeVideo) {
 }
 
 function getProductNameWithModel(video: RawYoutubeVideo) {
-  return clean(video.productNameWithModel) || clean(video.productName) || "-";
+  return clean(video.productNameWithModel) || clean(video.productName) || "";
+}
+
+function getAiFieldValue(video: RawYoutubeVideo, value?: string) {
+  const cleaned = clean(value);
+
+  if (cleaned) return cleaned;
+
+  if (
+    video.analysisStatus === "pending" ||
+    video.analysisStatus === "pending_retry" ||
+    !video.aiProcessed
+  ) {
+    return "Pending AI analysis";
+  }
+
+  return "-";
 }
 
 function getVideoUrlLabel(url?: string) {
@@ -342,7 +358,7 @@ export default function RawDataPage() {
         widthClassName: "min-w-[180px]",
         render: (video) => (
           <span className="font-semibold text-slate-950">
-            {video.sponsorBrand || "-"}
+            {getAiFieldValue(video, video.sponsorBrand)}
           </span>
         ),
       },
@@ -350,7 +366,7 @@ export default function RawDataPage() {
         id: "promoCode",
         header: "Promo Code",
         widthClassName: "min-w-[130px]",
-        render: (video) => video.promoCode || "-",
+        render: (video) => getAiFieldValue(video, video.promoCode),
       },
       {
         id: "productNameWithModel",
@@ -358,7 +374,7 @@ export default function RawDataPage() {
         widthClassName: "min-w-[300px]",
         render: (video) => (
           <p className="whitespace-normal text-sm leading-6 text-slate-700">
-            {getProductNameWithModel(video)}
+            {getAiFieldValue(video, getProductNameWithModel(video))}
           </p>
         ),
       },
@@ -366,7 +382,7 @@ export default function RawDataPage() {
         id: "sponsorshipType",
         header: "Sponsorship Type",
         widthClassName: "min-w-[180px]",
-        render: (video) => video.sponsorshipType || "-",
+        render: (video) => getAiFieldValue(video, video.sponsorshipType),
       },
     ],
     [expandedDescriptionId]

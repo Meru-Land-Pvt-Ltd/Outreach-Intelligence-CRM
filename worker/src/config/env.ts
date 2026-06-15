@@ -113,6 +113,8 @@ export const env = {
   maxVideosPerSeed: numberValue(process.env.MAX_VIDEOS_PER_SEED, 20),
   maxChannelsPerSeed: numberValue(process.env.MAX_CHANNELS_PER_SEED, 50),
   maxVideosPerChannel: numberValue(process.env.MAX_VIDEOS_PER_CHANNEL, 20),
+  rawVideoAnalysisBatchSize: numberValue(process.env.RAW_VIDEO_ANALYSIS_BATCH_SIZE, 5),
+  rawVideoAnalysisLimit: numberValue(process.env.RAW_VIDEO_ANALYSIS_LIMIT, 1000),
   videoLookbackDays: numberValue(process.env.VIDEO_LOOKBACK_DAYS, 90),
   recentSponsorshipDays: numberValue(process.env.RECENT_SPONSORSHIP_DAYS, 30),
 
