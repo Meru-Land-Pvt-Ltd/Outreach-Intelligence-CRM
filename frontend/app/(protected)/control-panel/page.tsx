@@ -459,8 +459,12 @@ export default function ControlPanelPage() {
         clean(response?.data?.currentStep) ||
         (action === "pause" ? "PAUSED" : action === "resume" ? "RESUMED" : "STOPPED");
 
-      setActiveCrawls((prev) =>
-        prev.map((item) =>
+      setActiveCrawls((prev) => {
+        if (action === "stop") {
+          return prev.filter((item) => clean(item.jobId) !== jobId);
+        }
+
+        return prev.map((item) =>
           clean(item.jobId) === jobId
             ? {
                 ...item,
@@ -470,8 +474,8 @@ export default function ControlPanelPage() {
                 message: response?.message || item.message,
               }
             : item
-        )
-      );
+        );
+      });
 
       setNotice({
         type: "success",
@@ -539,12 +543,18 @@ export default function ControlPanelPage() {
     return seedDeals.slice(0, recentPage * PAGE_SIZE);
   }, [seedDeals, recentPage]);
 
+  const activeCrawlsForTable = useMemo(() => {
+    return activeCrawls.filter((row) =>
+      ["queued", "running", "paused"].includes(getEffectiveCrawlStatus(row))
+    );
+  }, [activeCrawls]);
+
   const visibleActiveCrawls = useMemo(() => {
-    return activeCrawls.slice(0, activePage * PAGE_SIZE);
-  }, [activeCrawls, activePage]);
+    return activeCrawlsForTable.slice(0, activePage * PAGE_SIZE);
+  }, [activeCrawlsForTable, activePage]);
 
   const recentTotalPages = Math.max(1, Math.ceil(seedDeals.length / PAGE_SIZE));
-  const activeTotalPages = Math.max(1, Math.ceil(activeCrawls.length / PAGE_SIZE));
+  const activeTotalPages = Math.max(1, Math.ceil(activeCrawlsForTable.length / PAGE_SIZE));
 
   const activeColumns = useMemo<AdminTableColumn<CrawlJob>[]>(
     () => [
@@ -925,7 +935,7 @@ export default function ControlPanelPage() {
           pagination={{
             page: activePage,
             totalPages: activeTotalPages,
-            totalItems: activeCrawls.length,
+            totalItems: activeCrawlsForTable.length,
             limit: PAGE_SIZE,
             onPageChange: setActivePage,
             loading,

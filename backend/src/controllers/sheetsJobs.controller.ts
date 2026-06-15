@@ -98,6 +98,10 @@ function isFinishedStatus(status: any) {
   return ["completed", "failed", "stopped"].includes(normalizeJobStatus(status));
 }
 
+function isActiveCrawlStatus(status: any) {
+  return ["queued", "running", "paused"].includes(normalizeJobStatus(status));
+}
+
 function getObjectIdString(value: any) {
   const text = cleanText(value?._id || value);
 
@@ -698,11 +702,32 @@ export async function getActiveIntelligenceJobs(req: Request, res: Response) {
         const seedBrand = seedBrandId ? seedBrandById.get(seedBrandId) : null;
 
         if (log) {
+          const status = normalizeJobStatus(log.status || state);
+
+          if (!isActiveCrawlStatus(status)) {
+            if (job && state !== "active") {
+              try {
+                await job.remove();
+              } catch {
+                // Ignore remove failures; the job is hidden from the active list
+                // because JobLog is now the source of truth for stopped/finished state.
+              }
+            }
+
+            return null;
+          }
+
           return {
             ...normalizeJobLog(log, seedBrand),
-            status: normalizeJobStatus(log.status || state),
+            status,
             jobId: String(job.id)
           };
+        }
+
+        const status = normalizeJobStatus(state);
+
+        if (!isActiveCrawlStatus(status)) {
+          return null;
         }
 
         const seedFields = seedBrand ? buildSeedBrandFields(seedBrand) : {};
@@ -711,7 +736,7 @@ export async function getActiveIntelligenceJobs(req: Request, res: Response) {
           jobId: String(job.id),
           seedBrandId,
           ...seedFields,
-          status: normalizeJobStatus(state),
+          status,
           startedAt: job.timestamp ? new Date(job.timestamp).toISOString() : null,
           createdAt: job.timestamp ? new Date(job.timestamp).toISOString() : null,
           totalFound: 0,
@@ -722,10 +747,12 @@ export async function getActiveIntelligenceJobs(req: Request, res: Response) {
       })
     );
 
+    const activeData = data.filter(Boolean);
+
     res.json({
       success: true,
-      count: data.length,
-      data
+      count: activeData.length,
+      data: activeData
     });
   } catch (error: any) {
     res.status(500).json({
