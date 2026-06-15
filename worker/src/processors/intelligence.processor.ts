@@ -59,6 +59,71 @@ function cleanText(value: any) {
   return String(value || "").trim();
 }
 
+class CrawlStoppedError extends Error {
+  constructor(message = "Crawl stopped by user") {
+    super(message);
+    this.name = "CrawlStoppedError";
+  }
+}
+
+function delay(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function normalizeControlStatus(status: any) {
+  const value = cleanText(status).toLowerCase();
+
+  if (["stopped", "stop_requested", "cancelled", "canceled"].includes(value)) {
+    return "stopped";
+  }
+
+  if (value === "paused") {
+    return "paused";
+  }
+
+  return value;
+}
+
+async function readControlStatus(jobId: string) {
+  const log = await JobLog.findOne({ jobId }).lean();
+
+  return normalizeControlStatus(log?.status);
+}
+
+async function enforceCrawlerControl(jobId: string) {
+  let status = await readControlStatus(jobId);
+
+  if (status === "stopped") {
+    throw new CrawlStoppedError();
+  }
+
+  if (status !== "paused") {
+    return;
+  }
+
+  await JobLog.findOneAndUpdate(
+    { jobId },
+    {
+      $set: {
+        status: "paused",
+        currentStep: "PAUSED",
+        message: "Crawl paused. Resume to continue."
+      }
+    }
+  );
+
+  const pollMs = Number(process.env.CRAWL_CONTROL_POLL_MS || 3000);
+
+  while (status === "paused") {
+    await delay(pollMs > 0 ? pollMs : 3000);
+    status = await readControlStatus(jobId);
+
+    if (status === "stopped") {
+      throw new CrawlStoppedError();
+    }
+  }
+}
+
 async function updateProgress(
   job: Job,
   jobId: string,
@@ -66,6 +131,8 @@ async function updateProgress(
   progress: number,
   extraSet: Record<string, any> = {}
 ) {
+  await enforceCrawlerControl(jobId);
+
   console.log("JOB STEP:", currentStep);
 
   try {
@@ -108,6 +175,28 @@ async function markJobCompleted(
         completedAt: new Date(),
         result,
         error: ""
+      }
+    },
+    {
+      upsert: true,
+      new: true
+    }
+  );
+}
+
+async function markJobStopped(jobId: string, message = "Crawl stopped by user") {
+  await JobLog.findOneAndUpdate(
+    { jobId },
+    {
+      $set: {
+        status: "stopped",
+        currentStep: "STOPPED",
+        message,
+        completedAt: new Date(),
+        error: ""
+      },
+      $unset: {
+        pausedAt: ""
       }
     },
     {
@@ -460,10 +549,36 @@ export async function intelligenceProcessor(job: Job) {
       instantlyExportResult
     };
   } catch (error: any) {
-    console.error("PIPELINE FAILED:", error?.message || error);
-
     const { seedBrandId } = job.data;
     const failedSeedBrand: any = await SeedBrand.findById(seedBrandId).lean();
+
+    if (error?.name === "CrawlStoppedError") {
+      console.log("PIPELINE STOPPED:", jobId);
+
+      if (failedSeedBrand?.brandName) {
+        await addPipelineTrackerLog({
+          type: "Seed",
+          brandName: failedSeedBrand.brandName,
+          domain: "",
+          status: "STOPPED"
+        });
+      }
+
+      await SeedBrand.findByIdAndUpdate(seedBrandId, {
+        $set: {
+          status: "stopped"
+        }
+      });
+
+      await markJobStopped(jobId);
+
+      return {
+        success: false,
+        stopped: true
+      };
+    }
+
+    console.error("PIPELINE FAILED:", error?.message || error);
 
     if (failedSeedBrand?.brandName) {
       await addPipelineTrackerLog({

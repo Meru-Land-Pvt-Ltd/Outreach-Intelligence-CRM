@@ -582,22 +582,22 @@ export default function InstantlyControlPanelPage() {
   const [pushForm, setPushForm] = useState({
     channel: "Enoylity Technology" as Channel,
     campaignName: "Outreach Campaign " + today(),
-    numLeads: "5",
+    numLeads: "160",
     startDate: today(),
     endDate: plusDays(14),
     startTime: "09:00",
     endTime: "16:00",
-    dailyLimit: "40",
+    dailyLimit: "160",
     selectedSenders: FALLBACK_SENDERS["Enoylity Technology"],
   });
 
   const [batchForm, setBatchForm] = useState({
     channel: "Enoylity Technology" as Channel,
-    numLeads: "5",
+    numLeads: "160",
     startDate: today(),
     startTime: "09:00",
     endTime: "16:00",
-    dailyLimit: "40",
+    dailyLimit: "160",
     numWeekdays: "3",
     selectedSenders: FALLBACK_SENDERS["Enoylity Technology"],
   });

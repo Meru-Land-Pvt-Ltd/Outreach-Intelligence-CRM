@@ -25,20 +25,27 @@ function getLimit(value: any) {
 
 function normalizeClosedDealPayload(body: any) {
   return {
-    month: cleanText(body.month),
-    influencerHandle: cleanText(body.influencerHandle),
+    month: cleanText(body.month || body.Month),
+    influencerHandle: cleanText(
+      body.influencerHandle || body.influencer || body["Influencer Handle"]
+    ),
     brandName:
       cleanText(body.brandName) ||
       cleanText(body.brand) ||
-      cleanText(body.companyName),
+      cleanText(body.companyName) ||
+      cleanText(body["Brand Name"]) ||
+      cleanText(body.Brand) ||
+      cleanText(body["Company Name"]),
     productName:
       cleanText(body.productName) ||
       cleanText(body.product) ||
-      cleanText(body.productNameWithModel),
-    email: cleanEmail(body.email),
-    totalDealAmount: Number(body.totalDealAmount || body.amount || 0),
-    channel: cleanText(body.channel),
-    status: cleanText(body.status) || "pending"
+      cleanText(body.productNameWithModel) ||
+      cleanText(body["Product Name"]) ||
+      cleanText(body.Product),
+    email: cleanEmail(body.email || body.Email),
+    totalDealAmount: Number(body.totalDealAmount || body.amount || body["Total Deal Amount"] || 0),
+    channel: cleanText(body.channel || body.Channel),
+    status: cleanText(body.status || body.Status) || "pending"
   };
 }
 
@@ -50,24 +57,140 @@ function normalizeJobStatus(status: any) {
   if (["completed", "success", "done"].includes(value)) return "completed";
   if (["failed", "error"].includes(value)) return "failed";
   if (["active", "running", "processing"].includes(value)) return "running";
+  if (["paused"].includes(value)) return "paused";
+  if (["stopped", "stop_requested", "cancelled", "canceled"].includes(value)) {
+    return "stopped";
+  }
 
   return value;
 }
 
-function normalizeJobLog(log: any) {
+function getJobControlMessage(action: "pause" | "resume" | "stop") {
+  if (action === "pause") return "Crawl paused. Resume to continue.";
+  if (action === "resume") return "Crawl resumed.";
+  return "Crawl stopped.";
+}
+
+async function updateSeedBrandStatus(seedBrandId: any, status: string) {
+  if (!seedBrandId || !mongoose.Types.ObjectId.isValid(String(seedBrandId))) {
+    return;
+  }
+
+  await SeedBrand.findByIdAndUpdate(String(seedBrandId), {
+    $set: {
+      status
+    }
+  });
+}
+
+async function getJobControlContext(jobId: string) {
+  const job = await intelligenceQueue.getJob(jobId);
+  const log = await JobLog.findOne({ jobId });
+
+  return {
+    job,
+    log,
+    state: job ? await job.getState() : ""
+  };
+}
+
+function isFinishedStatus(status: any) {
+  return ["completed", "failed", "stopped"].includes(normalizeJobStatus(status));
+}
+
+function getObjectIdString(value: any) {
+  const text = cleanText(value?._id || value);
+
+  if (!mongoose.Types.ObjectId.isValid(text)) {
+    return "";
+  }
+
+  return text;
+}
+
+function getJobLogSeedBrandId(log: any, jobData: any = {}) {
+  return (
+    getObjectIdString(log?.seedBrandId) ||
+    getObjectIdString(log?.raw?.seedBrand?._id) ||
+    getObjectIdString(jobData?.seedBrandId)
+  );
+}
+
+function buildSeedBrandFields(seedBrand: any = {}) {
+  return {
+    brandName: cleanText(seedBrand?.brandName),
+    month: cleanText(seedBrand?.month),
+    productName: cleanText(seedBrand?.productName),
+    influencerHandle: cleanText(seedBrand?.influencerHandle),
+    email: cleanEmail(seedBrand?.email),
+    totalDealAmount: Number(seedBrand?.totalDealAmount || 0),
+    crawlCount: Number(seedBrand?.crawlCount || 0)
+  };
+}
+
+async function getSeedBrandSnapshot(seedBrandId: any) {
+  const id = getObjectIdString(seedBrandId);
+
+  if (!id) {
+    return null;
+  }
+
+  return SeedBrand.findById(id).lean();
+}
+
+function getRawBrandName(raw: any = {}) {
+  return (
+    cleanText(raw?.brandName) ||
+    cleanText(raw?.brand) ||
+    cleanText(raw?.companyName) ||
+    cleanText(raw?.["Brand Name"]) ||
+    cleanText(raw?.Brand) ||
+    cleanText(raw?.["Company Name"])
+  );
+}
+
+function normalizeClosedDealRow(row: any) {
+  const raw = row?.raw || {};
+
+  return {
+    ...row,
+    brandName: cleanText(row?.brandName) || getRawBrandName(raw),
+    productName:
+      cleanText(row?.productName) ||
+      cleanText(raw?.productName) ||
+      cleanText(raw?.product) ||
+      cleanText(raw?.["Product Name"]),
+    influencerHandle:
+      cleanText(row?.influencerHandle) ||
+      cleanText(raw?.influencerHandle) ||
+      cleanText(raw?.influencer) ||
+      cleanText(raw?.["Influencer Handle"]),
+    email: cleanEmail(row?.email) || cleanEmail(raw?.email || raw?.Email)
+  };
+}
+
+function normalizeJobLog(log: any, seedBrand: any = null) {
   const rawSeed = log?.raw?.seedBrand || {};
+  const seedFields = buildSeedBrandFields(seedBrand || rawSeed);
 
   return {
     _id: String(log?._id || ""),
     jobId: String(log?.jobId || ""),
-    seedBrandId: String(log?.seedBrandId || rawSeed?._id || ""),
-    month: log?.month || rawSeed?.month || "",
-    productName: log?.productName || rawSeed?.productName || "",
-    brandName: log?.brandName || rawSeed?.brandName || "",
-    influencerHandle: log?.influencerHandle || rawSeed?.influencerHandle || "",
-    email: log?.email || rawSeed?.email || "",
-    totalDealAmount: Number(log?.totalDealAmount || rawSeed?.totalDealAmount || 0),
-    crawlCount: Number(log?.crawlCount || rawSeed?.crawlCount || 0),
+    seedBrandId: getJobLogSeedBrandId(log) || getObjectIdString(seedBrand?._id),
+    month: cleanText(log?.month) || cleanText(rawSeed?.month) || seedFields.month,
+    productName:
+      cleanText(log?.productName) || cleanText(rawSeed?.productName) || seedFields.productName,
+    brandName:
+      cleanText(log?.brandName) || cleanText(rawSeed?.brandName) || seedFields.brandName,
+    influencerHandle:
+      cleanText(log?.influencerHandle) ||
+      cleanText(rawSeed?.influencerHandle) ||
+      seedFields.influencerHandle,
+    email: cleanEmail(log?.email) || cleanEmail(rawSeed?.email) || seedFields.email,
+    totalDealAmount: Number(
+      log?.totalDealAmount || rawSeed?.totalDealAmount || seedFields.totalDealAmount || 0
+    ),
+    crawlCount: Number(log?.crawlCount || rawSeed?.crawlCount || seedFields.crawlCount || 0),
     status: normalizeJobStatus(log?.status),
     startedAt: log?.startedAt || log?.createdAt || null,
     completedAt: log?.completedAt || null,
@@ -91,10 +214,12 @@ export async function getClosedDeals(req: Request, res: Response) {
       .limit(limit)
       .lean();
 
+    const data = rows.map(normalizeClosedDealRow);
+
     res.json({
       success: true,
-      count: rows.length,
-      data: rows
+      count: data.length,
+      data
     });
   } catch (error: any) {
     res.status(500).json({
@@ -271,6 +396,253 @@ export async function runIntelligenceJob(req: Request, res: Response) {
   }
 }
 
+
+export async function pauseIntelligenceJob(req: Request, res: Response) {
+  try {
+    const jobId = cleanText(req.params.jobId);
+
+    if (!jobId) {
+      return res.status(400).json({
+        success: false,
+        message: "jobId is required"
+      });
+    }
+
+    const { job, log, state } = await getJobControlContext(jobId);
+
+    if (!job && !log) {
+      return res.status(404).json({
+        success: false,
+        message: "Crawl job not found"
+      });
+    }
+
+    if (isFinishedStatus(log?.status || state)) {
+      return res.status(400).json({
+        success: false,
+        message: "This crawl has already finished and cannot be paused."
+      });
+    }
+
+    const seedBrandId = log?.seedBrandId || job?.data?.seedBrandId || null;
+    const seedBrand = await getSeedBrandSnapshot(seedBrandId);
+    const seedBrandFields = seedBrand ? buildSeedBrandFields(seedBrand) : {};
+    const message = getJobControlMessage("pause");
+
+    await JobLog.findOneAndUpdate(
+      { jobId },
+      {
+        $set: {
+          jobId,
+          seedBrandId,
+          type: "intelligence",
+          ...seedBrandFields,
+          status: "paused",
+          currentStep: "PAUSED",
+          message,
+          pausedAt: new Date()
+        }
+      },
+      {
+        upsert: true,
+        returnDocument: "after"
+      }
+    );
+
+    await updateSeedBrandStatus(seedBrandId, "paused");
+
+    res.json({
+      success: true,
+      message,
+      data: {
+        jobId,
+        seedBrandId: seedBrandId ? String(seedBrandId) : "",
+        ...seedBrandFields,
+        status: "paused",
+        currentStep: "PAUSED"
+      }
+    });
+  } catch (error: any) {
+    res.status(500).json({
+      success: false,
+      message: error.message
+    });
+  }
+}
+
+export async function resumeIntelligenceJob(req: Request, res: Response) {
+  try {
+    const jobId = cleanText(req.params.jobId);
+
+    if (!jobId) {
+      return res.status(400).json({
+        success: false,
+        message: "jobId is required"
+      });
+    }
+
+    const { job, log, state } = await getJobControlContext(jobId);
+
+    if (!job && !log) {
+      return res.status(404).json({
+        success: false,
+        message: "Crawl job not found"
+      });
+    }
+
+    const currentStatus = normalizeJobStatus(log?.status || state);
+
+    if (currentStatus !== "paused") {
+      return res.status(400).json({
+        success: false,
+        message: "Only paused crawls can be resumed."
+      });
+    }
+
+    if (!job) {
+      return res.status(404).json({
+        success: false,
+        message: "This crawl is no longer in the queue. Please start a new crawl."
+      });
+    }
+
+    const seedBrandId = log?.seedBrandId || job.data?.seedBrandId || null;
+    const seedBrand = await getSeedBrandSnapshot(seedBrandId);
+    const seedBrandFields = seedBrand ? buildSeedBrandFields(seedBrand) : {};
+    const nextStatus = state === "active" ? "running" : "queued";
+    const message = getJobControlMessage("resume");
+
+    await JobLog.findOneAndUpdate(
+      { jobId },
+      {
+        $set: {
+          ...seedBrandFields,
+          status: nextStatus,
+          currentStep: state === "active" ? "RESUMED" : "QUEUED",
+          message,
+          resumedAt: new Date()
+        },
+        $unset: {
+          pausedAt: ""
+        }
+      },
+      {
+        upsert: true,
+        returnDocument: "after"
+      }
+    );
+
+    await updateSeedBrandStatus(seedBrandId, nextStatus);
+
+    res.json({
+      success: true,
+      message,
+      data: {
+        jobId,
+        seedBrandId: seedBrandId ? String(seedBrandId) : "",
+        ...seedBrandFields,
+        status: nextStatus,
+        currentStep: state === "active" ? "RESUMED" : "QUEUED"
+      }
+    });
+  } catch (error: any) {
+    res.status(500).json({
+      success: false,
+      message: error.message
+    });
+  }
+}
+
+export async function stopIntelligenceJob(req: Request, res: Response) {
+  try {
+    const jobId = cleanText(req.params.jobId);
+
+    if (!jobId) {
+      return res.status(400).json({
+        success: false,
+        message: "jobId is required"
+      });
+    }
+
+    const { job, log, state } = await getJobControlContext(jobId);
+
+    if (!job && !log) {
+      return res.status(404).json({
+        success: false,
+        message: "Crawl job not found"
+      });
+    }
+
+    if (normalizeJobStatus(log?.status) === "completed") {
+      return res.status(400).json({
+        success: false,
+        message: "Completed crawls cannot be stopped."
+      });
+    }
+
+    const seedBrandId = log?.seedBrandId || job?.data?.seedBrandId || null;
+    const seedBrand = await getSeedBrandSnapshot(seedBrandId);
+    const seedBrandFields = seedBrand ? buildSeedBrandFields(seedBrand) : {};
+    const message =
+      state === "active"
+        ? "Crawl stop requested. It will stop after the current step finishes."
+        : getJobControlMessage("stop");
+
+    if (job && state !== "active") {
+      try {
+        await job.remove();
+      } catch {
+        // If BullMQ cannot remove it because the state changed, the worker will
+        // still respect the stopped JobLog status at the next checkpoint.
+      }
+    }
+
+    await JobLog.findOneAndUpdate(
+      { jobId },
+      {
+        $set: {
+          jobId,
+          seedBrandId,
+          type: "intelligence",
+          ...seedBrandFields,
+          status: "stopped",
+          currentStep: "STOPPED",
+          message,
+          stoppedAt: new Date(),
+          completedAt: new Date(),
+          error: ""
+        },
+        $unset: {
+          pausedAt: ""
+        }
+      },
+      {
+        upsert: true,
+        returnDocument: "after"
+      }
+    );
+
+    await updateSeedBrandStatus(seedBrandId, "stopped");
+
+    res.json({
+      success: true,
+      message,
+      data: {
+        jobId,
+        seedBrandId: seedBrandId ? String(seedBrandId) : "",
+        ...seedBrandFields,
+        status: "stopped",
+        currentStep: "STOPPED"
+      }
+    });
+  } catch (error: any) {
+    res.status(500).json({
+      success: false,
+      message: error.message
+    });
+  }
+}
+
 export async function getActiveIntelligenceJobs(req: Request, res: Response) {
   try {
     const jobs = await intelligenceQueue.getJobs(
@@ -293,32 +665,57 @@ export async function getActiveIntelligenceJobs(req: Request, res: Response) {
       logByJobId.set(String(log.jobId), log);
     }
 
+    const seedBrandIds = Array.from(
+      new Set(
+        jobs
+          .map((job) => {
+            const log = logByJobId.get(String(job.id));
+            return getJobLogSeedBrandId(log, job.data);
+          })
+          .filter(Boolean)
+      )
+    );
+
+    const seedBrands = seedBrandIds.length
+      ? await SeedBrand.find({
+          _id: {
+            $in: seedBrandIds
+          }
+        }).lean()
+      : [];
+
+    const seedBrandById = new Map<string, any>();
+
+    for (const seedBrand of seedBrands) {
+      seedBrandById.set(String(seedBrand._id), seedBrand);
+    }
+
     const data = await Promise.all(
       jobs.map(async (job) => {
         const state = await job.getState();
         const log = logByJobId.get(String(job.id));
+        const seedBrandId = getJobLogSeedBrandId(log, job.data);
+        const seedBrand = seedBrandId ? seedBrandById.get(seedBrandId) : null;
 
         if (log) {
           return {
-            ...normalizeJobLog(log),
+            ...normalizeJobLog(log, seedBrand),
             status: normalizeJobStatus(log.status || state),
             jobId: String(job.id)
           };
         }
 
-        const seedBrand = job.data?.seedBrandId
-          ? await SeedBrand.findById(job.data.seedBrandId).lean()
-          : null;
+        const seedFields = seedBrand ? buildSeedBrandFields(seedBrand) : {};
 
         return {
           jobId: String(job.id),
-          seedBrandId: String(job.data?.seedBrandId || ""),
-          brandName: seedBrand?.brandName || "",
-          influencerHandle: seedBrand?.influencerHandle || "",
+          seedBrandId,
+          ...seedFields,
           status: normalizeJobStatus(state),
           startedAt: job.timestamp ? new Date(job.timestamp).toISOString() : null,
           createdAt: job.timestamp ? new Date(job.timestamp).toISOString() : null,
           totalFound: 0,
+          currentStep: state === "active" ? "RUNNING" : "QUEUED",
           message: state === "active" ? "Crawl is running." : "Crawl queued.",
           progress: Number(job.progress || 0)
         };
@@ -349,7 +746,28 @@ export async function getIntelligenceJobHistory(req: Request, res: Response) {
       .limit(limit)
       .lean();
 
-    const data = rows.map(normalizeJobLog);
+    const seedBrandIds = Array.from(
+      new Set(rows.map((row: any) => getJobLogSeedBrandId(row)).filter(Boolean))
+    );
+
+    const seedBrands = seedBrandIds.length
+      ? await SeedBrand.find({
+          _id: {
+            $in: seedBrandIds
+          }
+        }).lean()
+      : [];
+
+    const seedBrandById = new Map<string, any>();
+
+    for (const seedBrand of seedBrands) {
+      seedBrandById.set(String(seedBrand._id), seedBrand);
+    }
+
+    const data = rows.map((row: any) => {
+      const seedBrandId = getJobLogSeedBrandId(row);
+      return normalizeJobLog(row, seedBrandId ? seedBrandById.get(seedBrandId) : null);
+    });
 
     res.json({
       success: true,

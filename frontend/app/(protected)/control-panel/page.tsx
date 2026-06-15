@@ -2,7 +2,7 @@
 
 import type { FormEvent } from "react";
 import { useEffect, useMemo, useState } from "react";
-import { Play, Plus } from "lucide-react";
+import { Pause, Play, Plus, Square } from "lucide-react";
 import { apiGet, apiPost } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -165,16 +165,22 @@ function getSeedBrandId(row: SeedDeal) {
 }
 
 function getJobStep(row: CrawlJob) {
+  const status = getEffectiveCrawlStatus(row);
+
   return (
     clean(row.currentStep) ||
     clean(row.message) ||
-    (normalizeStatus(row.status) === "completed"
+    (status === "completed"
       ? "Completed"
-      : normalizeStatus(row.status) === "running"
+      : status === "running"
         ? "In Progress"
-        : normalizeStatus(row.status) === "failed"
-          ? "Failed"
-          : "Queued")
+        : status === "paused"
+          ? "Paused"
+          : status === "stopped"
+            ? "Stopped"
+            : status === "failed"
+              ? "Failed"
+              : "Queued")
   );
 }
 
@@ -210,6 +216,43 @@ function getActiveInfluencer(row: CrawlJob, seedDeals: SeedDeal[]) {
     matched?.influencerHandle ||
     "-"
   );
+}
+
+function getActiveBrandName(row: CrawlJob, seedDeals: SeedDeal[]) {
+  const matched = getMatchedSeedDeal(row, seedDeals);
+
+  return (
+    clean(row.brandName) ||
+    clean(row.raw?.seedBrand?.brandName) ||
+    clean(row.raw?.brandName) ||
+    clean(row.raw?.brand) ||
+    clean(row.raw?.companyName) ||
+    clean(matched?.brandName) ||
+    clean(matched?.raw?.brandName) ||
+    clean(matched?.raw?.brand) ||
+    clean(matched?.raw?.companyName) ||
+    "-"
+  );
+}
+
+function getEffectiveCrawlStatus(row: CrawlJob) {
+  const normalized = normalizeStatus(row.status);
+  const step = clean(row.currentStep).toLowerCase();
+  const message = clean(row.message).toLowerCase();
+
+  if (normalized === "paused" || step.includes("paused") || message.includes("paused")) {
+    return "paused";
+  }
+
+  if (
+    normalized === "stopped" ||
+    step.includes("stopped") ||
+    message.includes("stopped")
+  ) {
+    return "stopped";
+  }
+
+  return normalized;
 }
 
 function getActiveEmail(row: CrawlJob, seedDeals: SeedDeal[]) {
@@ -259,6 +302,7 @@ export default function ControlPanelPage() {
   const [loading, setLoading] = useState(true);
   const [addingSeedDeal, setAddingSeedDeal] = useState(false);
   const [runningSeedBrandId, setRunningSeedBrandId] = useState("");
+  const [controllingJob, setControllingJob] = useState("");
 
   const [recentPage, setRecentPage] = useState(1);
   const [activePage, setActivePage] = useState(1);
@@ -315,6 +359,15 @@ export default function ControlPanelPage() {
     refreshAll();
   }, []);
 
+  useEffect(() => {
+    const intervalId = window.setInterval(() => {
+      loadActiveCrawls();
+      loadHistoryCrawls();
+    }, 5000);
+
+    return () => window.clearInterval(intervalId);
+  }, []);
+
   async function handleAddSeedDeal(e: FormEvent<HTMLFormElement>) {
     e.preventDefault();
     setAddingSeedDeal(true);
@@ -363,6 +416,77 @@ export default function ControlPanelPage() {
     }
 
     setAddingSeedDeal(false);
+  }
+
+  async function handleControlCrawl(
+    row: CrawlJob,
+    action: "pause" | "resume" | "stop"
+  ) {
+    const jobId = clean(row.jobId);
+
+    if (!jobId) {
+      setNotice({
+        type: "error",
+        text: "Job ID missing. Please refresh and try again.",
+      });
+      return;
+    }
+
+    const actionLabel =
+      action === "pause" ? "pause" : action === "resume" ? "resume" : "stop";
+
+    setControllingJob(`${jobId}:${action}`);
+    setNotice(null);
+
+    try {
+      const response: any = await apiPost(
+        `/jobs/intelligence/${jobId}/${action}`,
+        {}
+      );
+
+      if (!response?.success) {
+        setNotice({
+          type: "error",
+          text: response?.message || `Failed to ${actionLabel} crawl.`,
+        });
+        setControllingJob("");
+        return;
+      }
+
+      const nextStatus = clean(response?.data?.status) ||
+        (action === "pause" ? "paused" : action === "resume" ? "running" : "stopped");
+      const nextStep =
+        clean(response?.data?.currentStep) ||
+        (action === "pause" ? "PAUSED" : action === "resume" ? "RESUMED" : "STOPPED");
+
+      setActiveCrawls((prev) =>
+        prev.map((item) =>
+          clean(item.jobId) === jobId
+            ? {
+                ...item,
+                ...response?.data,
+                status: nextStatus,
+                currentStep: nextStep,
+                message: response?.message || item.message,
+              }
+            : item
+        )
+      );
+
+      setNotice({
+        type: "success",
+        text: response?.message || `Crawl ${actionLabel} request completed.`,
+      });
+
+      await refreshAll();
+    } catch {
+      setNotice({
+        type: "error",
+        text: `Failed to ${actionLabel} crawl.`,
+      });
+    }
+
+    setControllingJob("");
   }
 
   async function handleRunCrawl(seedDeal: SeedDeal) {
@@ -453,7 +577,7 @@ export default function ControlPanelPage() {
         widthClassName: "min-w-[190px]",
         render: (row) => (
           <span className="font-semibold text-slate-950">
-            {row.brandName || row.raw?.seedBrand?.brandName || "-"}
+            {getActiveBrandName(row, seedDeals)}
           </span>
         ),
       },
@@ -496,7 +620,7 @@ export default function ControlPanelPage() {
         id: "status",
         header: "Status",
         widthClassName: "min-w-[130px]",
-        render: (row) => <StatusBadge status={row.status} />,
+        render: (row) => <StatusBadge status={getEffectiveCrawlStatus(row)} />,
       },
       {
         id: "startedAt",
@@ -733,6 +857,71 @@ export default function ControlPanelPage() {
           emptyTitle={loading ? "Loading active crawls..." : "No active crawls found."}
           emptyDescription="Started crawls will appear here."
           containerClassName="rounded-xl shadow-none"
+          actions={{
+            header: "Controls",
+            align: "right",
+            cellClassName: "min-w-[240px]",
+            render: (row) => {
+              const jobId = clean(row.jobId);
+              const normalized = getEffectiveCrawlStatus(row);
+              const isPausing = controllingJob === `${jobId}:pause`;
+              const isResuming = controllingJob === `${jobId}:resume`;
+              const isStopping = controllingJob === `${jobId}:stop`;
+              const isBusy = Boolean(controllingJob && controllingJob.startsWith(`${jobId}:`));
+              const canResume = normalized === "paused";
+              const canPause = ["queued", "running"].includes(normalized);
+              const canStop = ["queued", "running", "paused"].includes(normalized);
+
+              if (!jobId || (!canPause && !canResume && !canStop)) {
+                return <span className="text-xs font-semibold text-slate-400">-</span>;
+              }
+
+              return (
+                <div className="flex flex-wrap justify-end gap-2">
+                  {canPause ? (
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="outline"
+                      disabled={isBusy}
+                      onClick={() => handleControlCrawl(row, "pause")}
+                      className="h-8 rounded-md border-blue-200 px-3 text-blue-700 hover:bg-blue-50"
+                    >
+                      <Pause className="mr-1.5 h-3.5 w-3.5" />
+                      {isPausing ? "Pausing..." : "Pause"}
+                    </Button>
+                  ) : null}
+
+                  {canResume ? (
+                    <Button
+                      type="button"
+                      size="sm"
+                      disabled={isBusy}
+                      onClick={() => handleControlCrawl(row, "resume")}
+                      className="h-8 rounded-md bg-blue-600 px-3 text-white hover:bg-blue-700"
+                    >
+                      <Play className="mr-1.5 h-3.5 w-3.5 fill-current" />
+                      {isResuming ? "Resuming..." : "Resume"}
+                    </Button>
+                  ) : null}
+
+                  {canStop ? (
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="destructive"
+                      disabled={isBusy}
+                      onClick={() => handleControlCrawl(row, "stop")}
+                      className="h-8 rounded-md px-3"
+                    >
+                      <Square className="mr-1.5 h-3.5 w-3.5 fill-current" />
+                      {isStopping ? "Stopping..." : "Stop"}
+                    </Button>
+                  ) : null}
+                </div>
+              );
+            },
+          }}
           pagination={{
             page: activePage,
             totalPages: activeTotalPages,
