@@ -15,6 +15,7 @@ type CrawlInput = {
   seedBrandId: string;
   brandName: string;
   productName?: string;
+  checkControl?: () => Promise<void>;
 };
 
 const GENERIC_PRODUCT_TOKENS = new Set([
@@ -151,6 +152,7 @@ async function collectSeedInfluencerChannels(input: CrawlInput) {
   const seedVideoIdToKeyword = new Map<string, string>();
 
   for (const query of queries) {
+    await input.checkControl?.();
     console.log("Searching seed videos:", query);
 
     const result = await searchYoutubeVideos({
@@ -171,7 +173,10 @@ async function collectSeedInfluencerChannels(input: CrawlInput) {
     }
   }
 
-  const seedVideoIds = Array.from(seedVideoIdToKeyword.keys()).slice(0, 50);
+  const seedVideoIds = Array.from(seedVideoIdToKeyword.keys()).slice(
+    0,
+    Math.max(50, env.maxSeedVideosToInspect)
+  );
 
   const seedVideoDetails: any[] = [];
 
@@ -192,6 +197,7 @@ async function collectSeedInfluencerChannels(input: CrawlInput) {
   >();
 
   for (const video of seedVideoDetails) {
+    await input.checkControl?.();
     if (!isSeedVideoRelevant(video, input.brandName, input.productName)) {
       continue;
     }
@@ -220,11 +226,12 @@ async function collectSeedInfluencerChannels(input: CrawlInput) {
   return Array.from(channelMap.values());
 }
 
-async function collectRecentVideosFromChannels(channels: any[]) {
+async function collectRecentVideosFromChannels(channels: any[], checkControl?: () => Promise<void>) {
   const publishedAfter = getPublishedAfterDate();
   const videoIdToSource = new Map<string, any>();
 
   for (const channel of channels) {
+    await checkControl?.();
     console.log("Crawling influencer channel:", channel.channelName, channel.channelId);
 
     let pageToken: string | undefined = undefined;
@@ -232,6 +239,7 @@ async function collectRecentVideosFromChannels(channels: any[]) {
     let channelVideosFound = 0;
 
     do {
+      await checkControl?.();
       const result = await searchYoutubeVideos({
         channelId: channel.channelId,
         publishedAfter,
@@ -264,7 +272,7 @@ async function collectRecentVideosFromChannels(channels: any[]) {
 
       if (channelVideosFound >= env.maxVideosPerChannel) break;
       if (videoIdToSource.size >= env.maxVideosPerSeed) break;
-    } while (pageToken && pagesFetched < 2);
+    } while (pageToken && pagesFetched < env.maxChannelPagesPerSeed);
 
     if (videoIdToSource.size >= env.maxVideosPerSeed) {
       break;
@@ -277,6 +285,14 @@ async function collectRecentVideosFromChannels(channels: any[]) {
 export async function crawlSeedBrandYoutubeVideos(input: CrawlInput) {
   console.log("Seed brand:", input.brandName);
   console.log("Seed product:", input.productName || "");
+
+  console.log("Crawl limits:", {
+    maxVideosPerSeed: env.maxVideosPerSeed,
+    maxChannelsPerSeed: env.maxChannelsPerSeed,
+    maxVideosPerChannel: env.maxVideosPerChannel,
+    maxSeedVideosToInspect: env.maxSeedVideosToInspect,
+    maxChannelPagesPerSeed: env.maxChannelPagesPerSeed
+  });
 
   const influencerChannels = await collectSeedInfluencerChannels(input);
 
@@ -294,7 +310,7 @@ export async function crawlSeedBrandYoutubeVideos(input: CrawlInput) {
     };
   }
 
-  const videoIdToSource = await collectRecentVideosFromChannels(influencerChannels);
+  const videoIdToSource = await collectRecentVideosFromChannels(influencerChannels, input.checkControl);
 
   const videoIds = Array.from(videoIdToSource.keys()).slice(
     0,
@@ -313,6 +329,7 @@ export async function crawlSeedBrandYoutubeVideos(input: CrawlInput) {
   const videoDetails: any[] = [];
 
   for (const chunk of chunkArray(videoIds, 50)) {
+    await input.checkControl?.();
     const result = await getYoutubeVideoDetails(chunk);
     videoDetails.push(...(result.items || []));
   }
@@ -324,6 +341,7 @@ export async function crawlSeedBrandYoutubeVideos(input: CrawlInput) {
   const channelDetailsMap = new Map<string, any>();
 
   for (const chunk of chunkArray(Array.from(new Set(channelIds)), 50)) {
+    await input.checkControl?.();
     const result = await getYoutubeChannelDetails(chunk);
 
     for (const channel of result.items || []) {
@@ -335,6 +353,7 @@ export async function crawlSeedBrandYoutubeVideos(input: CrawlInput) {
   let skippedBySubscribers = 0;
 
   for (const video of videoDetails) {
+    await input.checkControl?.();
     const snippet = video.snippet || {};
     const statistics = video.statistics || {};
     const contentDetails = video.contentDetails || {};

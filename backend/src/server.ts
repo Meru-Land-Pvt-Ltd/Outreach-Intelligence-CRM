@@ -9,8 +9,8 @@ async function startServer() {
   await connectDatabase();
 
   app.use("/api/reviews", reviewsRoutes);
-app.use("/api/auth", authRoutes);
-app.listen(env.port, () => {
+  app.use("/api/auth", authRoutes);
+  app.listen(env.port, () => {
     console.log(`Backend running on http://localhost:${env.port}`);
   });
 }

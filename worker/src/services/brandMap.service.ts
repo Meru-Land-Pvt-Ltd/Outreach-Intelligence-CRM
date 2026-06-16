@@ -267,12 +267,14 @@ export async function buildBrandMapForSeedBrand(seedBrandId: string) {
     grouped.get(brandName)!.push(video);
   }
 
-  const existingDomains: Record<string, boolean> = {};
+  const existingDomainSeedMap: Record<string, string> = {};
   const existingRows = await BrandMap.find({}).lean();
 
   for (const row of existingRows as any[]) {
     const domain = cleanDomain(row.domain);
-    if (domain) existingDomains[domain] = true;
+    if (domain) {
+      existingDomainSeedMap[domain] = String(row.seedBrandId || "");
+    }
   }
 
   let createdOrUpdated = 0;
@@ -336,7 +338,9 @@ export async function buildBrandMapForSeedBrand(seedBrandId: string) {
       continue;
     }
 
-    if (existingDomains[domain]) {
+    const existingSeedForDomain = existingDomainSeedMap[domain];
+
+    if (existingSeedForDomain && existingSeedForDomain !== String(seedBrandId)) {
       skippedDuplicateDomain += 1;
 
       await addPipelineTrackerLog({
@@ -415,7 +419,7 @@ export async function buildBrandMapForSeedBrand(seedBrandId: string) {
       }
     );
 
-    existingDomains[domain] = true;
+    existingDomainSeedMap[domain] = String(seedBrandId);
 
     await addPipelineTrackerLog({
       type: "Discovered",

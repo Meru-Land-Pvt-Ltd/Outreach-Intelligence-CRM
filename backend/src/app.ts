@@ -10,6 +10,7 @@ import rawYoutubeRoutes from "./routes/rawYoutube.routes";
 import brandMapRoutes from "./routes/brandMap.routes";
 import contactRoutes from "./routes/contact.routes";
 import sheetsRoutes from "./routes/sheets.routes";
+import sheetsJobsRoutes from "./routes/sheetsJobs.routes";
 import instantlyRoutes from "./routes/instantly.routes";
 
 export const app = express();
@@ -23,6 +24,8 @@ app.use(
 app.use(express.json());
 
 app.use("/api/health", healthRoutes);
+
+app.use("/api", sheetsJobsRoutes);
 app.use("/api/seed-brands", seedBrandRoutes);
 app.use("/api/jobs", jobRoutes);
 app.use("/api/raw-youtube", rawYoutubeRoutes);

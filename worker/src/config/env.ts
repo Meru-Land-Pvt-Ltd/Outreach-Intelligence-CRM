@@ -110,9 +110,26 @@ export const env = {
   ),
   prospeoSearchPages: numberValue(process.env.PROSPEO_SEARCH_PAGES, 3),
 
-  maxVideosPerSeed: numberValue(process.env.MAX_VIDEOS_PER_SEED, 20),
-  maxChannelsPerSeed: numberValue(process.env.MAX_CHANNELS_PER_SEED, 50),
-  maxVideosPerChannel: numberValue(process.env.MAX_VIDEOS_PER_CHANNEL, 20),
+  maxVideosPerSeed: Math.max(
+    numberValue(process.env.MAX_VIDEOS_PER_SEED, 1000),
+    1000
+  ),
+  maxChannelsPerSeed: Math.max(
+    numberValue(process.env.MAX_CHANNELS_PER_SEED, 250),
+    250
+  ),
+  maxVideosPerChannel: Math.max(
+    numberValue(process.env.MAX_VIDEOS_PER_CHANNEL, 100),
+    100
+  ),
+  maxSeedVideosToInspect: Math.max(
+    numberValue(process.env.MAX_SEED_VIDEOS_TO_INSPECT, 500),
+    500
+  ),
+  maxChannelPagesPerSeed: Math.max(
+    numberValue(process.env.MAX_CHANNEL_PAGES_PER_SEED, 20),
+    20
+  ),
   rawVideoAnalysisBatchSize: numberValue(process.env.RAW_VIDEO_ANALYSIS_BATCH_SIZE, 5),
   rawVideoAnalysisLimit: numberValue(process.env.RAW_VIDEO_ANALYSIS_LIMIT, 1000),
   videoLookbackDays: numberValue(process.env.VIDEO_LOOKBACK_DAYS, 90),

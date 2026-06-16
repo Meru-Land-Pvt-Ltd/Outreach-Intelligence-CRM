@@ -2,7 +2,8 @@ import { RawYoutubeVideo } from "../models/RawYoutubeVideo.model";
 import { buildRawVideoAnalysisPrompt } from "../prompts/rawVideoAnalysis.prompt";
 import { callOpenAIText } from "./ai.service";
 import {
-  buildMissingRawVideoFieldSet,
+  blankRawVideoAiFieldFilter,
+  buildRawVideoFieldSet,
   inferRawVideoFields
 } from "./rawVideoFieldInference.service";
 
@@ -16,12 +17,55 @@ type ParsedLine = {
 };
 
 function normalizeCell(value: any) {
-  return String(value || "").replace(/\*\*/g, "").trim();
+  return String(value || "")
+    .replace(/\*\*/g, "")
+    .replace(/^['\"]|['\"]$/g, "")
+    .trim();
 }
 
+function stripCodeFence(text: string) {
+  return String(text || "")
+    .replace(/```(?:json|markdown|md)?/gi, "")
+    .replace(/```/g, "")
+    .trim();
+}
 
-function parseOpenAIResponse(text: string): ParsedLine[] {
-  const lines = text
+function parseJsonResponse(text: string): ParsedLine[] {
+  const cleaned = stripCodeFence(text);
+
+  try {
+    const parsed = JSON.parse(cleaned);
+    const rows = Array.isArray(parsed)
+      ? parsed
+      : Array.isArray(parsed?.videos)
+        ? parsed.videos
+        : Array.isArray(parsed?.data)
+          ? parsed.data
+          : [];
+
+    return rows
+      .map((row: any, index: number) => ({
+        videoNumber: Number(row.videoNumber || row.video_number || row.index || index + 1),
+        channelCategory: normalizeCell(row.channelCategory || row.channel_category || row.category),
+        sponsorBrand: normalizeCell(row.sponsorBrand || row.sponsor_brand || row.brand),
+        promoCode: normalizeCell(row.promoCode || row.promo_code || row.code),
+        productNameWithModel: normalizeCell(
+          row.productNameWithModel ||
+            row.product_name_with_model ||
+            row.productName ||
+            row.product_name ||
+            row.product
+        ),
+        sponsorshipType: normalizeCell(row.sponsorshipType || row.sponsorship_type || row.type)
+      }))
+      .filter((row: ParsedLine) => row.videoNumber > 0);
+  } catch {
+    return [];
+  }
+}
+
+function parsePipeResponse(text: string): ParsedLine[] {
+  const lines = stripCodeFence(text)
     .split("\n")
     .map((line) => line.trim())
     .filter(Boolean);
@@ -31,7 +75,7 @@ function parseOpenAIResponse(text: string): ParsedLine[] {
   for (const line of lines) {
     const cleanedLine = line.replace(/^\|/, "").replace(/\|$/, "").trim();
 
-    if (/^-{2,}\|/.test(cleanedLine) || /video\s*number/i.test(cleanedLine)) {
+    if (/^[-:\s|]+$/.test(cleanedLine) || /video\s*number/i.test(cleanedLine)) {
       continue;
     }
 
@@ -57,17 +101,40 @@ function parseOpenAIResponse(text: string): ParsedLine[] {
   return parsed;
 }
 
-function buildSet(video: any, item: ParsedLine) {
-  const inferredFields = inferRawVideoFields(video, item);
-  const fieldSet = buildMissingRawVideoFieldSet(video, inferredFields);
+function parseOpenAIResponse(text: string): ParsedLine[] {
+  const jsonRows = parseJsonResponse(text);
+
+  if (jsonRows.length > 0) {
+    return jsonRows;
+  }
+
+  return parsePipeResponse(text);
+}
+
+function buildCompletedSet(video: any, item?: Partial<ParsedLine>, status = "completed", error = "") {
+  const fields = inferRawVideoFields(video, item || {});
 
   return {
-    ...fieldSet,
+    ...buildRawVideoFieldSet(fields),
     aiProcessed: true,
-    analysisStatus: "completed",
-    analysisError: "",
+    analysisStatus: status,
+    analysisError: error,
     analyzedAt: new Date()
   };
+}
+
+async function applyFallbackBatch(videos: any[], reason: string) {
+  let processed = 0;
+
+  for (const video of videos) {
+    await RawYoutubeVideo.findByIdAndUpdate(video._id, {
+      $set: buildCompletedSet(video, {}, "fallback_completed", reason)
+    });
+
+    processed += 1;
+  }
+
+  return processed;
 }
 
 async function analyzeBatch(videos: any[]) {
@@ -90,7 +157,7 @@ async function analyzeBatch(videos: any[]) {
     if (!video) continue;
 
     await RawYoutubeVideo.findByIdAndUpdate(video._id, {
-      $set: buildSet(video, item)
+      $set: buildCompletedSet(video, item, "completed", "")
     });
 
     processed += 1;
@@ -103,16 +170,13 @@ async function analyzeBatch(videos: any[]) {
 
     if (parsedVideoNumbers.has(index + 1)) continue;
 
-    const inferredFields = inferRawVideoFields(video);
-
     await RawYoutubeVideo.findByIdAndUpdate(video._id, {
-      $set: {
-        ...buildMissingRawVideoFieldSet(video, inferredFields),
-        aiProcessed: true,
-        analysisStatus: "fallback_completed",
-        analysisError: "OpenAI response did not include this row; fallback fields applied",
-        analyzedAt: new Date()
-      }
+      $set: buildCompletedSet(
+        video,
+        {},
+        "fallback_completed",
+        "OpenAI response did not include this row; fallback fields applied"
+      )
     });
 
     processed += 1;
@@ -120,6 +184,7 @@ async function analyzeBatch(videos: any[]) {
 
   return {
     processed,
+    parsedRows: parsed.length,
     rawResponse: aiText
   };
 }
@@ -129,104 +194,69 @@ function numberEnv(name: string, fallback: number) {
   return Number.isFinite(value) && value > 0 ? Math.floor(value) : fallback;
 }
 
-export async function analyzeUnprocessedRawVideos(seedBrandId: string) {
+export async function analyzeUnprocessedRawVideos(
+  seedBrandId: string,
+  checkControl?: () => Promise<void>
+) {
   const batchSize = Math.min(numberEnv("RAW_VIDEO_ANALYSIS_BATCH_SIZE", 5), 10);
   const maxTotalToAnalyze = numberEnv("RAW_VIDEO_ANALYSIS_LIMIT", 1000);
 
   let totalProcessed = 0;
   let totalBatches = 0;
+  let fallbackOnlyReason = "";
   const rawResponses: string[] = [];
 
   while (totalProcessed < maxTotalToAnalyze) {
+    await checkControl?.();
+    const remaining = maxTotalToAnalyze - totalProcessed;
     const videos = await RawYoutubeVideo.find({
       seedBrandId,
       $or: [
         { aiProcessed: { $ne: true } },
-        { analysisStatus: { $in: ["", "pending", "failed"] } },
+        { analysisStatus: { $in: ["", "pending", "pending_retry", "failed"] } },
         { analysisStatus: { $exists: false } },
-        { sponsorBrand: { $exists: false } },
-        { sponsorBrand: null },
-        { sponsorBrand: /^\s*$/ },
-        { sponsorBrand: /^\s*-\s*$/ },
-        { promoCode: { $exists: false } },
-        { promoCode: null },
-        { promoCode: /^\s*$/ },
-        { promoCode: /^\s*-\s*$/ },
-        { channelCategory: { $exists: false } },
-        { channelCategory: null },
-        { channelCategory: /^\s*$/ },
-        { channelCategory: /^\s*-\s*$/ },
-        { productNameWithModel: { $exists: false } },
-        { productNameWithModel: null },
-        { productNameWithModel: /^\s*$/ },
-        { productNameWithModel: /^\s*-\s*$/ },
-        { sponsorshipType: { $exists: false } },
-        { sponsorshipType: null },
-        { sponsorshipType: /^\s*$/ },
-        { sponsorshipType: /^\s*-\s*$/ }
+        ...blankRawVideoAiFieldFilter().$or
       ]
     })
-      .sort({ publishedDate: -1 })
-      .limit(batchSize);
+      .sort({ publishedDate: -1, createdAt: -1 })
+      .limit(Math.min(batchSize, remaining));
 
     if (videos.length === 0) {
       break;
     }
 
+    totalBatches += 1;
+
+    if (fallbackOnlyReason) {
+      await checkControl?.();
+      totalProcessed += await applyFallbackBatch(videos, fallbackOnlyReason);
+      continue;
+    }
+
     try {
+      await checkControl?.();
       const result = await analyzeBatch(videos);
 
       totalProcessed += result.processed;
-      totalBatches += 1;
       rawResponses.push(result.rawResponse);
 
-      if (result.processed === 0) {
-        let fallbackProcessed = 0;
-
-        for (const video of videos) {
-          const inferredFields = inferRawVideoFields(video);
-
-          await RawYoutubeVideo.findByIdAndUpdate(video._id, {
-            $set: {
-              ...buildMissingRawVideoFieldSet(video, inferredFields),
-              aiProcessed: true,
-              analysisStatus: "fallback_completed",
-              analysisError: "OpenAI response parsed zero rows; fallback fields applied",
-              analyzedAt: new Date()
-            }
-          });
-
-          fallbackProcessed += 1;
-        }
-
-        totalProcessed += fallbackProcessed;
-        break;
+      if (result.parsedRows === 0) {
+        fallbackOnlyReason = "OpenAI response parsed zero rows; fallback fields applied";
       }
     } catch (error: any) {
-      for (const video of videos) {
-        const inferredFields = inferRawVideoFields(video);
+      fallbackOnlyReason =
+        (error.message || "Raw video analysis failed") + "; fallback fields applied";
 
-        await RawYoutubeVideo.findByIdAndUpdate(video._id, {
-          $set: {
-            ...buildMissingRawVideoFieldSet(video, inferredFields),
-            aiProcessed: true,
-            analysisStatus: "fallback_completed",
-            analysisError:
-              (error.message || "Raw video analysis failed") +
-              "; fallback fields applied",
-            analyzedAt: new Date()
-          }
-        });
-      }
-
-      totalProcessed += videos.length;
-      break;
+      await checkControl?.();
+      totalProcessed += await applyFallbackBatch(videos, fallbackOnlyReason);
     }
   }
 
   return {
     processed: totalProcessed,
     totalBatches,
+    fallbackOnly: Boolean(fallbackOnlyReason),
+    fallbackReason: fallbackOnlyReason,
     rawResponse: rawResponses.join("\n\n---BATCH---\n\n")
   };
 }

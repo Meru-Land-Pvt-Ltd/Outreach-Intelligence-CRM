@@ -1,8 +1,8 @@
 import { Job } from "bullmq";
 import mongoose from "mongoose";
 
-import { crawlSeedBrandYoutubeVideos } from "../services/youtubeSeedCrawler.service";
-import { analyzeUnprocessedRawVideos } from "../services/rawVideoAnalysis.service";
+import { crawlSeedBrandYoutubeVideos } from "../services/youtubeSeedCrawler.service"
+import { analyzeUnprocessedRawVideos } from "../services/rawVideoAnalysis.service"
 import { buildBrandMapForSeedBrand } from "../services/brandMap.service";
 import { rebuildNicheAnalysis } from "../services/nicheAnalysis.service";
 import { fillMissingDomainsForSeed } from "../services/domainFinder.service";
@@ -393,7 +393,8 @@ export async function intelligenceProcessor(job: Job) {
     const crawlResult = await crawlSeedBrandYoutubeVideos({
       seedBrandId,
       brandName: seedBrandName,
-      productName: seedProductName
+      productName: seedProductName,
+      checkControl: () => enforceCrawlerControl(jobId)
     });
 
     await updateProgress(
@@ -405,7 +406,10 @@ export async function intelligenceProcessor(job: Job) {
 
     await updateProgress(job, jobId, "PROCESS_RAW_VIDEOS_STARTED", 30);
 
-    const aiResult = await analyzeUnprocessedRawVideos(seedBrandId);
+    const aiResult = await analyzeUnprocessedRawVideos(
+      seedBrandId,
+      () => enforceCrawlerControl(jobId)
+    );
 
     await updateProgress(
       job,
