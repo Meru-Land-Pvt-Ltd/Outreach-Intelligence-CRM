@@ -554,6 +554,21 @@ function normalizeLeadStatus(value: any) {
     .replace(/[_\s]+/g, "-");
 }
 
+
+function shouldVerifyLeadStatus(value: any) {
+  const status = normalizeLeadStatus(value);
+
+  return (
+    !status ||
+    status === "-" ||
+    status === "not-verified" ||
+    status === "not-checked" ||
+    status === "pending" ||
+    status === "pending-verification" ||
+    status === "verification-pending"
+  );
+}
+
 function isVerificationRejected(value: any) {
   const status = normalizeLeadStatus(value);
 
@@ -806,7 +821,7 @@ async function getEligibleLeads(input: {
 
     let verificationStatus = cleanText(row.verificationStatus);
 
-    if (!verificationStatus) {
+    if (shouldVerifyLeadStatus(verificationStatus)) {
       const verifyResult = await verifyEmailWithMillionVerifier(email);
       verificationStatus = verifyResult.status;
 
@@ -1386,10 +1401,10 @@ export async function exportInstantlyLeads(req: Request, res: Response) {
               contact.verificationStatus === "valid" ||
               contact.verificationStatus === "Ok"
                 ? "Ok"
-                : "",
+                : "Pending Verification",
 
             instantlyBounced: "",
-            gatewayBounced: "",
+            gatewayBounced: "Not Checked",
 
             brandMapId: brandMap._id,
             contactId: contact._id,

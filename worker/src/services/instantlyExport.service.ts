@@ -378,10 +378,12 @@ export async function exportBrandToInstantlyTabs(brandName: string) {
         competitor2: "",
 
         pushedStatus: "",
-        verificationStatus: shouldMarkVerificationOk(contact) ? "Ok" : "",
+        verificationStatus: shouldMarkVerificationOk(contact)
+          ? "Ok"
+          : "Pending Verification",
 
         instantlyBounced: "",
-        gatewayBounced: "",
+        gatewayBounced: "Not Checked",
 
         brandMapId: brandMap._id,
         contactId: contact._id,

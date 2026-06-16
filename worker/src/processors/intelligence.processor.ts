@@ -1,14 +1,16 @@
 import { Job } from "bullmq";
 import mongoose from "mongoose";
 
-import { crawlSeedBrandYoutubeVideos } from "../services/youtubeSeedCrawler.service"
-import { analyzeUnprocessedRawVideos } from "../services/rawVideoAnalysis.service"
+import { crawlSeedBrandYoutubeVideos } from "../services/youtubeSeedCrawler.service";
+import { analyzeUnprocessedRawVideos } from "../services/rawVideoAnalysis.service";
 import { buildBrandMapForSeedBrand } from "../services/brandMap.service";
 import { rebuildNicheAnalysis } from "../services/nicheAnalysis.service";
 import { fillMissingDomainsForSeed } from "../services/domainFinder.service";
 import { discoverEmailsForPendingBrands } from "../services/emailDiscovery.service";
 import { verifyPendingContacts } from "../services/emailVerifier.service";
 import { exportBrandToInstantlyTabs } from "../services/instantlyExport.service";
+import { fillInstantlyLeadCompetitors } from "../services/competitor.service";
+import { backfillInstantlyLeadVerificationAndGateway } from "../services/instantlyLeadHygiene.service";
 import { updateTotalEmailsForBrand } from "../services/totalEmails.service";
 import { addPipelineTrackerLog } from "../services/pipelineTracker.service";
 import { crawlLatestReviewVideos } from "../services/latestReviews.service";
@@ -506,7 +508,40 @@ export async function intelligenceProcessor(job: Job) {
       "INSTANTLY_EXPORT_DONE_" +
         instantlyExportResult.exportedRows +
         "_ROWS",
+      97
+    );
+
+    await updateProgress(job, jobId, "INSTANTLY_COMPETITORS_STARTED", 98);
+
+    const instantlyCompetitorResult = await fillInstantlyLeadCompetitors();
+
+    console.log("Instantly competitor result:", instantlyCompetitorResult);
+
+    await updateProgress(
+      job,
+      jobId,
+      "INSTANTLY_COMPETITORS_DONE_" +
+        instantlyCompetitorResult.updated +
+        "_ROWS",
       98
+    );
+
+    await updateProgress(job, jobId, "INSTANTLY_VERIFICATION_GATEWAY_STARTED", 99);
+
+    const instantlyHygieneResult =
+      await backfillInstantlyLeadVerificationAndGateway();
+
+    console.log("Instantly verification/gateway result:", instantlyHygieneResult);
+
+    await updateProgress(
+      job,
+      jobId,
+      "INSTANTLY_VERIFICATION_GATEWAY_DONE_" +
+        instantlyHygieneResult.verificationUpdated +
+        "_VERIFIED_" +
+        instantlyHygieneResult.gatewayUpdated +
+        "_GATEWAYS",
+      99
     );
 
     await rebuildNicheAnalysis();
@@ -532,7 +567,9 @@ export async function intelligenceProcessor(job: Job) {
       domainResult,
       emailDiscoveryResult,
       verificationResult,
-      instantlyExportResult
+      instantlyExportResult,
+      instantlyCompetitorResult,
+      instantlyHygieneResult
     });
 
     console.log("====================================");
@@ -550,7 +587,9 @@ export async function intelligenceProcessor(job: Job) {
       domainResult,
       emailDiscoveryResult,
       verificationResult,
-      instantlyExportResult
+      instantlyExportResult,
+      instantlyCompetitorResult,
+      instantlyHygieneResult
     };
   } catch (error: any) {
     const { seedBrandId } = job.data;

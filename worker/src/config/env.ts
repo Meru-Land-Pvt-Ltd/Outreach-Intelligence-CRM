@@ -112,11 +112,11 @@ export const env = {
 
   maxVideosPerSeed: Math.max(
     numberValue(process.env.MAX_VIDEOS_PER_SEED, 1000),
-    1000
+    100000
   ),
   maxChannelsPerSeed: Math.max(
-    numberValue(process.env.MAX_CHANNELS_PER_SEED, 250),
-    250
+    numberValue(process.env.MAX_CHANNELS_PER_SEED, 500),
+    500
   ),
   maxVideosPerChannel: Math.max(
     numberValue(process.env.MAX_VIDEOS_PER_CHANNEL, 100),
@@ -127,23 +127,32 @@ export const env = {
     500
   ),
   maxChannelPagesPerSeed: Math.max(
-    numberValue(process.env.MAX_CHANNEL_PAGES_PER_SEED, 20),
-    20
+    numberValue(process.env.MAX_CHANNEL_PAGES_PER_SEED, 50),
+    50
   ),
-  rawVideoAnalysisBatchSize: numberValue(process.env.RAW_VIDEO_ANALYSIS_BATCH_SIZE, 5),
-  rawVideoAnalysisLimit: numberValue(process.env.RAW_VIDEO_ANALYSIS_LIMIT, 1000),
-  videoLookbackDays: numberValue(process.env.VIDEO_LOOKBACK_DAYS, 90),
+  rawVideoAnalysisBatchSize: Math.max(
+    numberValue(process.env.RAW_VIDEO_ANALYSIS_BATCH_SIZE, 5),
+    5
+  ),
+  rawVideoAnalysisLimit: Math.max(
+    numberValue(process.env.RAW_VIDEO_ANALYSIS_LIMIT, 1000),
+    1000
+  ),
+  videoLookbackDays: Math.max(numberValue(process.env.VIDEO_LOOKBACK_DAYS, 90), 90),
   recentSponsorshipDays: numberValue(process.env.RECENT_SPONSORSHIP_DAYS, 30),
 
   minSubscribers: numberValue(process.env.MIN_SUBSCRIBERS, 1000),
   maxSubscribers: numberValue(process.env.MAX_SUBSCRIBERS, 1000000),
 
   maxContactsPerBrand: numberValue(process.env.MAX_CONTACTS_PER_BRAND, 20),
-  maxDiscoveryBrandsPerRun: numberValue(
-    process.env.MAX_DISCOVERY_BRANDS_PER_RUN,
+  maxDiscoveryBrandsPerRun: Math.max(
+    numberValue(process.env.MAX_DISCOVERY_BRANDS_PER_RUN, 100),
     100
   ),
-  maxVerificationPerRun: numberValue(process.env.MAX_VERIFICATION_PER_RUN, 500),
+  maxVerificationPerRun: Math.max(
+    numberValue(process.env.MAX_VERIFICATION_PER_RUN, 1000),
+    1000
+  ),
   maxInstantlyPushPerRun: numberValue(process.env.MAX_INSTANTLY_PUSH_PER_RUN, 160),
 
   defaultTimezone: process.env.DEFAULT_TIMEZONE || "UTC",

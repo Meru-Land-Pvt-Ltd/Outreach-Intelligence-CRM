@@ -6,7 +6,8 @@
     "dev": "dotenvx run -f .env.production -- tsx watch src/index.ts",
     "build": "tsc",
     "start": "node dist/index.js",
-    "fix:raw-ai-fields": "tsx src/scripts/fixEmptyRawYoutubeAiFields.ts"
+    "fix:raw-ai-fields": "tsx src/scripts/fixEmptyRawYoutubeAiFields.ts",
+    "fix:instantly-fields": "tsx src/scripts/fixInstantlyLeadFields.ts"
   },
   "keywords": [],
   "author": "",
