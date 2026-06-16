@@ -198,8 +198,13 @@ export async function analyzeUnprocessedRawVideos(
   seedBrandId: string,
   checkControl?: () => Promise<void>
 ) {
-  const batchSize = Math.min(numberEnv("RAW_VIDEO_ANALYSIS_BATCH_SIZE", 5), 10);
-  const maxTotalToAnalyze = numberEnv("RAW_VIDEO_ANALYSIS_LIMIT", 1000);
+  const batchSize = Math.min(numberEnv("RAW_VIDEO_ANALYSIS_BATCH_SIZE", 10), 25);
+  const maxTotalToAnalyze = numberEnv("RAW_VIDEO_ANALYSIS_LIMIT", 100000);
+
+  console.log("Raw video analysis limits:", {
+    batchSize,
+    maxTotalToAnalyze
+  });
 
   let totalProcessed = 0;
   let totalBatches = 0;
@@ -227,9 +232,26 @@ export async function analyzeUnprocessedRawVideos(
 
     totalBatches += 1;
 
+    console.log("Raw video analysis batch started:", {
+      batch: totalBatches,
+      batchSize: videos.length,
+      totalProcessed,
+      maxTotalToAnalyze
+    });
+
     if (fallbackOnlyReason) {
       await checkControl?.();
       totalProcessed += await applyFallbackBatch(videos, fallbackOnlyReason);
+      console.log("Raw video analysis failed; fallback batch completed:", {
+        batch: totalBatches,
+        totalProcessed,
+        reason: fallbackOnlyReason
+      });
+      console.log("Raw video fallback batch completed:", {
+        batch: totalBatches,
+        totalProcessed,
+        reason: fallbackOnlyReason
+      });
       continue;
     }
 
@@ -240,6 +262,13 @@ export async function analyzeUnprocessedRawVideos(
       totalProcessed += result.processed;
       rawResponses.push(result.rawResponse);
 
+      console.log("Raw video analysis batch completed:", {
+        batch: totalBatches,
+        processed: result.processed,
+        parsedRows: result.parsedRows,
+        totalProcessed
+      });
+
       if (result.parsedRows === 0) {
         fallbackOnlyReason = "OpenAI response parsed zero rows; fallback fields applied";
       }
@@ -249,6 +278,11 @@ export async function analyzeUnprocessedRawVideos(
 
       await checkControl?.();
       totalProcessed += await applyFallbackBatch(videos, fallbackOnlyReason);
+      console.log("Raw video analysis failed; fallback batch completed:", {
+        batch: totalBatches,
+        totalProcessed,
+        reason: fallbackOnlyReason
+      });
     }
   }
 

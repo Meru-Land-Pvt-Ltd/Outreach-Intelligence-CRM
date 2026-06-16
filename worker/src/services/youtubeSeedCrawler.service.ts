@@ -274,7 +274,16 @@ async function collectRecentVideosFromChannels(channels: any[], checkControl?: (
       if (videoIdToSource.size >= env.maxVideosPerSeed) break;
     } while (pageToken && pagesFetched < env.maxChannelPagesPerSeed);
 
+    console.log("Finished influencer channel:", {
+      channelName: channel.channelName,
+      channelId: channel.channelId,
+      pagesFetched,
+      channelVideosFound,
+      totalVideosCollected: videoIdToSource.size
+    });
+
     if (videoIdToSource.size >= env.maxVideosPerSeed) {
+      console.log("Reached maxVideosPerSeed, stopping channel crawl:", env.maxVideosPerSeed);
       break;
     }
   }
@@ -291,7 +300,9 @@ export async function crawlSeedBrandYoutubeVideos(input: CrawlInput) {
     maxChannelsPerSeed: env.maxChannelsPerSeed,
     maxVideosPerChannel: env.maxVideosPerChannel,
     maxSeedVideosToInspect: env.maxSeedVideosToInspect,
-    maxChannelPagesPerSeed: env.maxChannelPagesPerSeed
+    maxChannelPagesPerSeed: env.maxChannelPagesPerSeed,
+    minSubscribers: env.minSubscribers,
+    maxSubscribers: env.maxSubscribers
   });
 
   const influencerChannels = await collectSeedInfluencerChannels(input);
@@ -328,10 +339,19 @@ export async function crawlSeedBrandYoutubeVideos(input: CrawlInput) {
 
   const videoDetails: any[] = [];
 
+  let detailChunkNumber = 0;
+
   for (const chunk of chunkArray(videoIds, 50)) {
     await input.checkControl?.();
+    detailChunkNumber += 1;
     const result = await getYoutubeVideoDetails(chunk);
     videoDetails.push(...(result.items || []));
+    console.log("Fetched video details chunk:", {
+      detailChunkNumber,
+      chunkSize: chunk.length,
+      totalVideoDetails: videoDetails.length,
+      totalVideoIds: videoIds.length
+    });
   }
 
   const channelIds = videoDetails
@@ -481,6 +501,15 @@ export async function crawlSeedBrandYoutubeVideos(input: CrawlInput) {
     }
 
     saved += 1;
+
+    if (saved % 100 === 0) {
+      console.log("Saved raw YouTube videos:", {
+        saved,
+        scanned: saved + skippedBySubscribers,
+        totalVideoDetails: videoDetails.length,
+        skippedBySubscribers
+      });
+    }
   }
 
   console.log("YouTube influencer crawl result:", {
