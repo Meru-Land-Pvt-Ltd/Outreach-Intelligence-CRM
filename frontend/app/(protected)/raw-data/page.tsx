@@ -35,6 +35,7 @@ type RawYoutubeVideo = {
 
   channelCountry?: string;
   channelCategory?: string;
+  category?: string;
 
   sponsorBrand?: string;
   promoCode?: string;
@@ -48,6 +49,21 @@ type RawYoutubeVideo = {
 
   source?: string;
   platform?: string;
+};
+
+type RawYoutubePagination = {
+  page?: number;
+  limit?: number;
+  totalItems?: number;
+  totalPages?: number;
+};
+
+type RawYoutubeResponse = {
+  success?: boolean;
+  count?: number;
+  data?: RawYoutubeVideo[];
+  pagination?: RawYoutubePagination;
+  message?: string;
 };
 
 const PAGE_SIZE = 1000;
@@ -94,6 +110,10 @@ function getProductNameWithModel(video: RawYoutubeVideo) {
   return clean(video.productNameWithModel) || clean(video.productName) || "";
 }
 
+function getChannelCategory(video: RawYoutubeVideo) {
+  return clean(video.channelCategory) || clean(video.category) || "";
+}
+
 function getAiFieldValue(video: RawYoutubeVideo, value?: string) {
   const cleaned = clean(value);
 
@@ -119,80 +139,130 @@ function getVideoUrlLabel(url?: string) {
   return `${value.slice(0, 20)}...`;
 }
 
-function getSearchText(video: RawYoutubeVideo) {
-  return [
-    video.seedBrandName,
-    video.channelName,
-    video.channelId,
-    video.videoTitle,
-    video.videoUrl,
-    video.videoDescription,
-    video.durationSec,
-    video.viewCount,
-    video.likeCount,
-    video.commentCount,
-    video.subscriberCount,
-    video.channelCountry,
-    video.channelCategory,
-    video.sponsorBrand,
-    video.promoCode,
-    video.productNameWithModel,
-    video.productName,
-    video.sponsorshipType,
-    video.analysisStatus,
-    video.source,
-    video.platform,
-  ]
-    .filter(Boolean)
-    .join(" ")
-    .toLowerCase();
+function getVideoUniqueKey(video: RawYoutubeVideo, fallbackIndex: number) {
+  return video._id || video.videoUrl || `${video.channelId || "row"}-${fallbackIndex}`;
+}
+
+function mergeUniqueVideos(
+  previousVideos: RawYoutubeVideo[],
+  nextVideos: RawYoutubeVideo[]
+) {
+  const seen = new Set<string>();
+  const merged: RawYoutubeVideo[] = [];
+
+  [...previousVideos, ...nextVideos].forEach((video, index) => {
+    const key = getVideoUniqueKey(video, index);
+
+    if (seen.has(key)) return;
+
+    seen.add(key);
+    merged.push(video);
+  });
+
+  return merged;
 }
 
 export default function RawDataPage() {
   const [videos, setVideos] = useState<RawYoutubeVideo[]>([]);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
 
   const [search, setSearch] = useState("");
+  const [debouncedSearch, setDebouncedSearch] = useState("");
+
   const [page, setPage] = useState(1);
+  const [totalItems, setTotalItems] = useState(0);
+  const [totalPages, setTotalPages] = useState(1);
 
-  const [expandedDescriptionId, setExpandedDescriptionId] = useState<string | null>(
-    null
-  );
+  const [expandedDescriptionId, setExpandedDescriptionId] = useState<
+    string | null
+  >(null);
 
-  async function loadVideos() {
-    setLoading(true);
-
-    try {
-      const response = await apiGet("/raw-youtube?limit=max");
-      setVideos(response?.data || []);
-    } catch {
+  useEffect(() => {
+    const timeout = setTimeout(() => {
       setVideos([]);
-    }
+      setPage(1);
+      setDebouncedSearch(search.trim());
+      setExpandedDescriptionId(null);
+    }, 400);
 
-    setLoading(false);
-  }
-
-  useEffect(() => {
-    loadVideos();
-  }, []);
-
-  useEffect(() => {
-    setPage(1);
+    return () => clearTimeout(timeout);
   }, [search]);
 
-  const filteredVideos = useMemo(() => {
-    const query = search.trim().toLowerCase();
+  useEffect(() => {
+    let active = true;
 
-    if (!query) return videos;
+    async function loadVideos() {
+      setLoading(true);
+      setError(null);
 
-    return videos.filter((video) => getSearchText(video).includes(query));
-  }, [videos, search]);
+      try {
+        const params = new URLSearchParams({
+          page: String(page),
+          limit: String(PAGE_SIZE),
+        });
 
-  const visibleVideos = useMemo(() => {
-    return filteredVideos.slice(0, page * PAGE_SIZE);
-  }, [filteredVideos, page]);
+        if (debouncedSearch) {
+          params.set("search", debouncedSearch);
+        }
 
-  const totalPages = Math.max(1, Math.ceil(filteredVideos.length / PAGE_SIZE));
+        const response = (await apiGet(
+          `/raw-youtube?${params.toString()}`
+        )) as RawYoutubeResponse | null;
+
+        if (!active) return;
+
+        if (!response || response.success === false) {
+          setVideos([]);
+          setTotalItems(0);
+          setTotalPages(1);
+          setError(response?.message || "Failed to load raw YouTube videos.");
+          return;
+        }
+
+        const receivedVideos = Array.isArray(response.data)
+          ? response.data
+          : [];
+
+        const pagination = response.pagination;
+
+        setVideos((previousVideos) => {
+          if (page === 1) {
+            return receivedVideos;
+          }
+
+          return mergeUniqueVideos(previousVideos, receivedVideos);
+        });
+
+        setTotalItems(
+          Number(
+            pagination?.totalItems ||
+              response.count ||
+              receivedVideos.length
+          )
+        );
+
+        setTotalPages(Number(pagination?.totalPages || 1));
+      } catch (err: any) {
+        if (!active) return;
+
+        setVideos([]);
+        setTotalItems(0);
+        setTotalPages(1);
+        setError(err?.message || "Failed to load raw YouTube videos.");
+      } finally {
+        if (active) {
+          setLoading(false);
+        }
+      }
+    }
+
+    loadVideos();
+
+    return () => {
+      active = false;
+    };
+  }, [page, debouncedSearch]);
 
   const columns = useMemo<AdminTableColumn<RawYoutubeVideo>[]>(
     () => [
@@ -247,7 +317,7 @@ export default function RawDataPage() {
               asChild
               size="sm"
               variant="ghost"
-              className="h-auto px-0 font-semibold !text-blue-600 !hover:text-blue-700"
+              className="h-auto px-0 font-semibold !text-blue-600 hover:!text-blue-700"
             >
               <a href={video.videoUrl} target="_blank" rel="noreferrer">
                 {getVideoUrlLabel(video.videoUrl)}
@@ -350,7 +420,7 @@ export default function RawDataPage() {
         id: "channelCategory",
         header: "Category",
         widthClassName: "min-w-[180px]",
-        render: (video) => video.channelCategory || "-",
+        render: (video) => getChannelCategory(video) || "-",
       },
       {
         id: "sponsorBrand",
@@ -390,7 +460,6 @@ export default function RawDataPage() {
 
   return (
     <main className="w-full space-y-6">
-
       <div className="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
         <div className="min-w-0">
           <h1 className="text-2xl font-bold tracking-tight text-slate-950">
@@ -398,11 +467,12 @@ export default function RawDataPage() {
           </h1>
 
           <p className="mt-1 text-sm font-medium text-slate-500">
-            All raw videos and extracted data from reviews.
+            Showing {videos.length.toLocaleString("en-IN")} of{" "}
+            {totalItems.toLocaleString("en-IN")} raw videos.
           </p>
         </div>
 
-        <div className="w-[50%] lg:max-w-[620px] xl:max-w-[720px]">
+        <div className="w-full lg:max-w-[620px] xl:max-w-[720px]">
           <FilterSearchInput
             value={search}
             onChange={setSearch}
@@ -412,13 +482,16 @@ export default function RawDataPage() {
       </div>
 
       <AdminTable
-        data={visibleVideos}
+        data={videos}
         columns={columns}
-        rowKey={(video, index) => video._id || video.videoUrl || String(index)}
-        loading={loading}
+        rowKey={(video, index) =>
+          video._id || video.videoUrl || String(index)
+        }
+        loading={loading && videos.length === 0}
         loadingRows={8}
+        error={error}
         emptyDescription={
-          search.trim()
+          debouncedSearch
             ? "No videos match your current search."
             : "Crawled raw videos will appear here."
         }
@@ -426,9 +499,14 @@ export default function RawDataPage() {
         pagination={{
           page,
           totalPages,
-          totalItems: filteredVideos.length,
+          totalItems,
           limit: PAGE_SIZE,
-          onPageChange: setPage,
+          onPageChange: (nextPage) => {
+            if (nextPage <= page) return;
+
+            setPage(nextPage);
+            setExpandedDescriptionId(null);
+          },
           loading,
           showSummary: true,
           showRowsSelector: false,

@@ -28,7 +28,13 @@ type InstantlyRow = {
 };
 
 const PAGE_SIZE = 1000;
+
 const ALL_VALUE = "All";
+const PUSHED_EMPTY_VALUE = "__PUSHED_EMPTY__";
+const PUSHED_FILLED_VALUE = "__PUSHED_FILLED__";
+
+const PUSHED_EMPTY_LABEL = "Show only empty";
+const PUSHED_FILLED_LABEL = "Show all pushed only";
 
 function clean(value: unknown) {
   const text = String(value || "").trim();
@@ -89,6 +95,18 @@ function toOptions(items: string[]) {
   ];
 }
 
+function toPushedStatusOptions(items: string[]) {
+  return [
+    { label: ALL_VALUE, value: ALL_VALUE },
+    { label: PUSHED_EMPTY_LABEL, value: PUSHED_EMPTY_VALUE },
+    { label: PUSHED_FILLED_LABEL, value: PUSHED_FILLED_VALUE },
+    ...items.map((item) => ({
+      label: item,
+      value: item,
+    })),
+  ];
+}
+
 function getSearchText(row: InstantlyRow) {
   return [
     row.firstName,
@@ -108,17 +126,41 @@ function getSearchText(row: InstantlyRow) {
     .toLowerCase();
 }
 
-function StatusBadge({ value }: { value?: string }) {
+function StatusBadge({
+  value,
+  emptyLabel = "-",
+}: {
+  value?: string;
+  emptyLabel?: string;
+}) {
   const text = clean(value);
 
-  if (!text) return <span className="text-slate-300">-</span>;
+  if (!text) {
+    if (emptyLabel !== "-") {
+      return (
+        <span className="inline-flex rounded-full bg-slate-100 px-2.5 py-1 text-xs font-semibold text-slate-600">
+          {emptyLabel}
+        </span>
+      );
+    }
+
+    return <span className="text-slate-300">-</span>;
+  }
 
   const lower = text.toLowerCase();
 
   if (
-    ["done", "completed", "success", "pushed", "verified", "valid", "no", "false"].includes(
-      lower
-    )
+    [
+      "done",
+      "completed",
+      "success",
+      "pushed",
+      "verified",
+      "valid",
+      "no",
+      "false",
+    ].includes(lower) ||
+    lower.startsWith("pushed")
   ) {
     return (
       <span className="inline-flex rounded-full bg-emerald-50 px-2.5 py-1 text-xs font-semibold text-emerald-700">
@@ -269,10 +311,15 @@ export default function MhdInstantlyPage() {
     const query = search.trim().toLowerCase();
 
     return rows.filter((row) => {
+      const cleanedPushedStatus = clean(row.pushedStatus);
+
       const matchesSearch = !query || getSearchText(row).includes(query);
 
       const matchesPushedStatus =
-        pushedStatus === ALL_VALUE || clean(row.pushedStatus) === pushedStatus;
+        pushedStatus === ALL_VALUE ||
+        (pushedStatus === PUSHED_EMPTY_VALUE && !cleanedPushedStatus) ||
+        (pushedStatus === PUSHED_FILLED_VALUE && Boolean(cleanedPushedStatus)) ||
+        cleanedPushedStatus === pushedStatus;
 
       const matchesVerificationStatus =
         verificationStatus === ALL_VALUE ||
@@ -385,7 +432,9 @@ export default function MhdInstantlyPage() {
         id: "pushedStatus",
         header: "Pushed Status",
         widthClassName: "min-w-[220px]",
-        render: (row) => <StatusBadge value={row.pushedStatus} />,
+        render: (row) => (
+          <StatusBadge value={row.pushedStatus} emptyLabel="" />
+        ),
       },
       {
         id: "verificationStatus",
@@ -434,7 +483,7 @@ export default function MhdInstantlyPage() {
             label="Pushed Status"
             value={pushedStatus}
             onChange={setPushedStatus}
-            options={toOptions(pushedStatusOptions)}
+            options={toPushedStatusOptions(pushedStatusOptions)}
           />
 
           <FilterSelect

@@ -1272,6 +1272,87 @@ function formatDayLabel(date: Date) {
   });
 }
 
+
+async function safeUpsertInstantlyLead(input: any) {
+  const channel = cleanText(input.channel);
+  const email = cleanEmail(input.email);
+
+  if (!channel || !email) {
+    return { lead: null, created: false, updated: false, skipped: true };
+  }
+
+  const existing = await InstantlyLeadModel.findOne({ channel, email });
+
+  if (existing && cleanText(existing.pushedStatus)) {
+    return { lead: existing, created: false, updated: false, skipped: true };
+  }
+
+  const payload = {
+    ...input,
+    channel,
+    email
+  };
+
+  delete payload._id;
+
+  // These fields must NOT be inside $set when they are also inside $setOnInsert.
+  // Also, for existing leads, we should not accidentally clear push/bounce/competitor status.
+  const insertDefaults = {
+    pushedStatus: cleanText(input.pushedStatus) || "",
+    instantlyBounced: cleanText(input.instantlyBounced) || "",
+    gatewayBounced: cleanText(input.gatewayBounced) || "",
+    competitor1: cleanText(input.competitor1) || "",
+    competitor2: cleanText(input.competitor2) || ""
+  };
+
+  delete payload.pushedStatus;
+  delete payload.instantlyBounced;
+  delete payload.gatewayBounced;
+  delete payload.competitor1;
+  delete payload.competitor2;
+
+  try {
+    const lead = await InstantlyLeadModel.findOneAndUpdate(
+      { channel, email },
+      {
+        $set: payload,
+        $setOnInsert: insertDefaults
+      },
+      {
+        upsert: true,
+        new: true,
+        setDefaultsOnInsert: true
+      }
+    );
+
+    return {
+      lead,
+      created: !existing,
+      updated: Boolean(existing),
+      skipped: false
+    };
+  } catch (error: any) {
+    if (error && error.code === 11000) {
+      const latest = await InstantlyLeadModel.findOne({ channel, email });
+
+      if (latest && cleanText(latest.pushedStatus)) {
+        return { lead: latest, created: false, updated: false, skipped: true };
+      }
+
+      const lead = await InstantlyLeadModel.findOneAndUpdate(
+        { channel, email },
+        { $set: payload },
+        { new: true }
+      );
+
+      return { lead, created: false, updated: true, skipped: false };
+    }
+
+    throw error;
+  }
+}
+
+
 export async function getInstantlyLeads(req: Request, res: Response) {
   try {
     const filter: Record<string, any> = {};
@@ -1324,10 +1405,12 @@ export async function exportInstantlyLeads(req: Request, res: Response) {
 
     let exported = 0;
     let skippedAlreadyExported = 0;
+    let updatedExistingUnpushed = 0;
     let contactsNormalized = 0;
     const companiesForCompetitors = new Set<string>();
 
-    const alreadyExportedEmails: Record<string, boolean> = {};
+    const existingLeadByChannelEmail: Record<string, any> = {};
+    const processedChannelEmails = new Set<string>();
 
     const existingLeads = await InstantlyLeadModel.find({
       email: { $exists: true, $nin: ["", null] }
@@ -1335,9 +1418,10 @@ export async function exportInstantlyLeads(req: Request, res: Response) {
 
     for (const lead of existingLeads as any[]) {
       const email = cleanEmail(lead.email);
+      const channel = cleanText(lead.channel);
 
-      if (email) {
-        alreadyExportedEmails[email] = true;
+      if (email && channel) {
+        existingLeadByChannelEmail[`${channel}::${email}`] = lead;
       }
     }
 
@@ -1362,10 +1446,6 @@ export async function exportInstantlyLeads(req: Request, res: Response) {
 
         if (!email) continue;
 
-        if (alreadyExportedEmails[email]) {
-          skippedAlreadyExported += 1;
-          continue;
-        }
 
         const contact = await normalizeContactBeforeExport(
           originalContact,
@@ -1384,7 +1464,8 @@ export async function exportInstantlyLeads(req: Request, res: Response) {
         for (const channel of ["Enoylity Technology", "MHD Tech"] as const) {
           const cfg = getChannelConfig(channel);
 
-          await InstantlyLeadModel.create({
+          {
+          const upsertResult = await safeUpsertInstantlyLead({
             channel,
             firstName,
             email,
@@ -1415,11 +1496,19 @@ export async function exportInstantlyLeads(req: Request, res: Response) {
             }
           });
 
+          if (upsertResult.skipped) {
+            skippedAlreadyExported += 1;
+            continue;
+          }
+
+          if (upsertResult.created) exported += 1;
+          if (upsertResult.updated) updatedExistingUnpushed += 1;
+        }
+
           exported += 1;
           companiesForCompetitors.add(brandName);
         }
 
-        alreadyExportedEmails[email] = true;
       }
     }
 
@@ -1431,6 +1520,7 @@ export async function exportInstantlyLeads(req: Request, res: Response) {
       competitorsCompanies: competitorFill.companies,
       competitorsUpdated: competitorFill.updated,
       skippedAlreadyExported,
+      updatedExistingUnpushed,
       contactsNormalized
     });
   } catch (error: any) {

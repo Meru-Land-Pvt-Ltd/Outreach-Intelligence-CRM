@@ -4,7 +4,7 @@ const RawYoutubeVideoSchema = new mongoose.Schema(
   {
     seedBrandId: {
       type: mongoose.Schema.Types.ObjectId,
-      ref: "SeedBrand"
+      ref: "SeedBrand",
     },
 
     seedBrandName: String,
@@ -40,10 +40,31 @@ const RawYoutubeVideoSchema = new mongoose.Schema(
     searchKeyword: String,
     relevanceStatus: String,
     isSponsored: Boolean,
-    raw: Object
+    raw: Object,
   },
   { timestamps: true }
 );
+
+RawYoutubeVideoSchema.index({
+  addedOn: -1,
+  publishedDate: -1,
+  createdAt: -1,
+});
+
+RawYoutubeVideoSchema.index({
+  seedBrandId: 1,
+  addedOn: -1,
+  publishedDate: -1,
+  createdAt: -1,
+});
+
+RawYoutubeVideoSchema.index({
+  videoId: 1,
+});
+
+RawYoutubeVideoSchema.index({
+  channelId: 1,
+});
 
 export const RawYoutubeVideo =
   mongoose.models.RawYoutubeVideo ||

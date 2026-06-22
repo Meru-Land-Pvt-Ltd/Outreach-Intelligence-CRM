@@ -52,6 +52,27 @@ type TemplatePreview = {
   followUp2?: string;
 };
 
+type ExportResult = {
+  success?: boolean;
+  exported?: number;
+  exportedRows?: number;
+  updated?: number;
+  updatedExistingUnpushed?: number;
+  skippedAlreadyExported?: number;
+  skippedPushedLeads?: number;
+  contactsNormalized?: number;
+  contactsFixed?: number;
+};
+
+type ExportStatusResponse = {
+  success?: boolean;
+  jobId?: string;
+  status?: "running" | "completed" | "failed";
+  message?: string;
+  error?: string;
+  result?: ExportResult;
+};
+
 const CHANNELS: Channel[] = ["Enoylity Technology", "MHD Tech"];
 
 const FALLBACK_SENDERS: Record<Channel, string[]> = {
@@ -113,6 +134,51 @@ function stripHtml(value?: string) {
 
 function getLeadKey(lead: ImportedLead, index: number) {
   return lead._id || lead.email || String(index);
+}
+
+function sleep(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function getExportNumber(result: ExportResult | undefined, keys: string[]) {
+  if (!result) return 0;
+
+  for (const key of keys) {
+    const value = Number((result as any)[key] || 0);
+
+    if (Number.isFinite(value) && value > 0) {
+      return value;
+    }
+  }
+
+  return 0;
+}
+
+function buildExportSuccessMessage(result: ExportResult | undefined) {
+  const newRows = getExportNumber(result, ["exported", "exportedRows"]);
+  const updatedExistingUnpushed = getExportNumber(result, [
+    "updatedExistingUnpushed",
+    "updated",
+  ]);
+  const skippedAlreadyPushed = getExportNumber(result, [
+    "skippedAlreadyExported",
+    "skippedPushedLeads",
+  ]);
+  const contactsFixed = getExportNumber(result, [
+    "contactsNormalized",
+    "contactsFixed",
+  ]);
+
+  return (
+    "Export complete. New rows: " +
+    newRows +
+    ", updated existing unpushed: " +
+    updatedExistingUnpushed +
+    ", skipped already pushed: " +
+    skippedAlreadyPushed +
+    ", contacts fixed: " +
+    contactsFixed
+  );
 }
 
 function FieldLabel({
@@ -561,7 +627,6 @@ export default function InstantlyControlPanelPage() {
   const [message, setMessage] = useState("");
   const [messageType, setMessageType] = useState<MessageType>("info");
   const [loadingAction, setLoadingAction] = useState("");
-  const [leadsExported, setLeadsExported] = useState(false);
 
   const [senderOptions, setSenderOptions] = useState<Record<Channel, string[]>>({
     "Enoylity Technology": FALLBACK_SENDERS["Enoylity Technology"],
@@ -603,15 +668,16 @@ export default function InstantlyControlPanelPage() {
   });
 
   const busy = Boolean(loadingAction);
+  const hasPreparedLeads = importedLeads.length > 0;
 
   const pushSenders = senderOptions[pushForm.channel] || [];
   const batchSenders = senderOptions[batchForm.channel] || [];
 
   const pushDisabled =
-    busy || !leadsExported || pushForm.selectedSenders.length === 0;
+    busy || !hasPreparedLeads || pushForm.selectedSenders.length === 0;
 
   const batchDisabled =
-    busy || !leadsExported || batchForm.selectedSenders.length === 0;
+    busy || !hasPreparedLeads || batchForm.selectedSenders.length === 0;
 
   const pushCapacity = useMemo(() => {
     return (
@@ -634,7 +700,7 @@ export default function InstantlyControlPanelPage() {
   }, [importedLeads]);
 
   const fillCompetitorsDisabled =
-    busy || (!leadsExported && importedLeads.length === 0);
+    busy || importedLeads.length === 0;
     
   async function loadSenders(channel: Channel) {
     try {
@@ -671,8 +737,9 @@ export default function InstantlyControlPanelPage() {
         )}&limit=`
       );
 
-      setImportedLeads(response?.data || response?.leads || []);
-    } catch {
+      const rows = response?.data || response?.leads || [];
+      setImportedLeads(rows);
+} catch {
       setImportedLeads([]);
     }
 
@@ -740,40 +807,89 @@ export default function InstantlyControlPanelPage() {
     setLoadingAction("");
   }
 
-  async function exportLeads() {
-    await runAction("Export Leads", async () => {
-      const response: any = await apiPost("/instantly/export", {});
+  async function waitForExportJob(jobId: string) {
+    for (let attempt = 0; attempt < 240; attempt += 1) {
+      await sleep(2000);
 
-      if (response?.success) {
-        setLeadsExported(true);
-        setSelectedPreviewKey("");
-        setSelectedPreviewLead(null);
-        setTemplatePreview(null);
-        setPreviewOpen(false);
+      const statusResponse = (await apiGet(
+        `/instantly/export/status/${encodeURIComponent(jobId)}`
+      )) as ExportStatusResponse | null;
 
-        await loadImportedLeads(pushForm.channel);
-
-        return {
-          success: true,
-          message:
-            "Export complete. New rows: " +
-            (response.exported || 0) +
-            ", skipped existing emails: " +
-            (response.skippedAlreadyExported || 0) +
-            ", contacts fixed: " +
-            (response.contactsNormalized || 0),
-        };
+      if (!statusResponse) {
+        continue;
       }
 
-      setLeadsExported(false);
-      return response;
-    });
+      if (statusResponse.status === "running") {
+        setMessageType("info");
+        setMessage("Export is running in background...");
+        continue;
+      }
+
+      if (statusResponse.status === "failed") {
+        throw new Error(
+          statusResponse.error || statusResponse.message || "Export failed."
+        );
+      }
+
+      if (statusResponse.status === "completed") {
+        return statusResponse.result || {};
+      }
+    }
+
+    throw new Error(
+      "Export is taking too long. Please refresh after a few minutes."
+    );
+  }
+
+  
+
+
+  async function exportLeads() {
+    setLoadingAction("Export Leads");
+    setMessageType("info");
+    setMessage("Export Leads started...");
+
+    try {
+      const response: any = await apiPost("/instantly/export", {});
+
+      let result: ExportResult | undefined;
+
+      if (response?.jobId) {
+        setMessageType("info");
+        setMessage("Export is running in background...");
+        result = await waitForExportJob(response.jobId);
+      } else if (response?.success) {
+        result = response;
+      } else {
+        setMessageType("error");
+        setMessage(response?.message || "Export Leads failed.");
+        setLoadingAction("");
+        return;
+      }
+
+      setSelectedPreviewKey("");
+      setSelectedPreviewLead(null);
+      setTemplatePreview(null);
+      setPreviewOpen(false);
+
+      await loadImportedLeads(pushForm.channel);
+
+      setMessageType("success");
+      setMessage(buildExportSuccessMessage(result));
+    } catch (error: any) {
+      setMessageType("error");
+      setMessage(error?.message || "Export Leads failed.");
+    }
+
+    setLoadingAction("");
   }
 
   async function pushSingle() {
-    if (!leadsExported) {
+    if (!hasPreparedLeads) {
       setMessageType("error");
-      setMessage("Export leads first before pushing a campaign.");
+      setMessage(
+        "No prepared leads found. Export leads first or refresh imported leads."
+      );
       return;
     }
 
@@ -809,9 +925,11 @@ export default function InstantlyControlPanelPage() {
   }
 
   async function pushBatch() {
-    if (!leadsExported) {
+    if (!hasPreparedLeads) {
       setMessageType("error");
-      setMessage("Export leads first before creating batch campaigns.");
+      setMessage(
+        "No prepared leads found. Export leads first or refresh imported leads."
+      );
       return;
     }
 
@@ -872,6 +990,13 @@ export default function InstantlyControlPanelPage() {
       channel,
       selectedSenders: senders,
     }));
+
+    setSelectedPreviewKey("");
+    setSelectedPreviewLead(null);
+    setTemplatePreview(null);
+    setPreviewOpen(false);
+
+    await loadImportedLeads(channel);
   }
 
   return (
@@ -894,7 +1019,7 @@ export default function InstantlyControlPanelPage() {
             <UploadCloud className="mr-2 h-4 w-4" />
             {loadingAction === "Export Leads"
               ? "Exporting..."
-              : leadsExported
+              : hasPreparedLeads
                 ? "Re-export Leads"
                 : "Export Leads"}
           </Button>
@@ -1025,7 +1150,7 @@ export default function InstantlyControlPanelPage() {
                 type="submit"
                 disabled={pushDisabled}
                 title={
-                  !leadsExported
+                  !hasPreparedLeads
                     ? "Export leads first before pushing campaign."
                     : pushForm.selectedSenders.length === 0
                       ? "Select at least one sender email."
@@ -1036,7 +1161,7 @@ export default function InstantlyControlPanelPage() {
                 <Send className="mr-2 h-4 w-4" />
                 {loadingAction === "Push Campaign"
                   ? "Pushing..."
-                  : !leadsExported
+                  : !hasPreparedLeads
                     ? "Export Leads First"
                     : "PUSH TO INSTANTLY"}
               </Button>
@@ -1160,7 +1285,7 @@ export default function InstantlyControlPanelPage() {
                 type="submit"
                 disabled={batchDisabled}
                 title={
-                  !leadsExported
+                  !hasPreparedLeads
                     ? "Export leads first before batch push."
                     : batchForm.selectedSenders.length === 0
                       ? "Select at least one sender email."
@@ -1171,7 +1296,7 @@ export default function InstantlyControlPanelPage() {
                 <CalendarDays className="mr-2 h-4 w-4" />
                 {loadingAction === "Batch Push"
                   ? "Creating..."
-                  : !leadsExported
+                  : !hasPreparedLeads
                     ? "Export Leads First"
                     : "Create Batch Campaigns"}
               </Button>
