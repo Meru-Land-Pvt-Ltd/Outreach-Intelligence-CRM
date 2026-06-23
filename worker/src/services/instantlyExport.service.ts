@@ -275,7 +275,6 @@ async function normalizeContact(contact: any, brandName: string) {
   return contact;
 }
 
-
 async function safeUpsertInstantlyLead(input: any) {
   const channel = cleanText(input.channel);
   const email = cleanEmail(input.email);
@@ -298,8 +297,6 @@ async function safeUpsertInstantlyLead(input: any) {
 
   delete payload._id;
 
-  // These fields must NOT be inside $set when they are also inside $setOnInsert.
-  // Also, for existing leads, we should not accidentally clear push/bounce/competitor status.
   const insertDefaults = {
     pushedStatus: cleanText(input.pushedStatus) || "",
     instantlyBounced: cleanText(input.instantlyBounced) || "",
@@ -323,7 +320,7 @@ async function safeUpsertInstantlyLead(input: any) {
       },
       {
         upsert: true,
-        new: true,
+        returnDocument: "after",
         setDefaultsOnInsert: true
       }
     );
@@ -345,7 +342,7 @@ async function safeUpsertInstantlyLead(input: any) {
       const lead = await InstantlyLeadModel.findOneAndUpdate(
         { channel, email },
         { $set: payload },
-        { new: true }
+        { returnDocument: "after" }
       );
 
       return { lead, created: false, updated: true, skipped: false };
@@ -354,7 +351,6 @@ async function safeUpsertInstantlyLead(input: any) {
     throw error;
   }
 }
-
 
 export async function exportBrandToInstantlyTabs(brandName: string) {
   const brandMap = await BrandMapModel.findOne({
@@ -402,37 +398,18 @@ export async function exportBrandToInstantlyTabs(brandName: string) {
     createdAt: 1
   });
 
-  const existingLeads = await InstantlyLeadModel.find({
-    email: {
-      $exists: true,
-      $nin: ["", null]
-    }
-  });
-
-  const existingLeadByChannelEmail: Record<string, any> = {};
-  const processedChannelEmails = new Set<string>();
-
-  for (const lead of existingLeads as any[]) {
-    const email = cleanEmail(lead.email);
-    const channel = cleanText(lead.channel);
-
-    if (email && channel) {
-      existingLeadByChannelEmail[`${channel}::${email}`] = lead;
-    }
-  }
-
   const productName = getProductNameFromBrandMap(brandMap);
 
   let exported = 0;
-  let updatedExistingUnpushed = 0;
+  let updated = 0;
   let skippedAlreadyExported = 0;
   let contactsNormalized = 0;
+  const processedChannelEmails = new Set<string>();
 
   for (const originalContact of contacts as any[]) {
     const email = cleanEmail(originalContact.email);
 
     if (!email) continue;
-
 
     const contact = await normalizeContact(originalContact, brandName);
 
@@ -446,52 +423,47 @@ export async function exportBrandToInstantlyTabs(brandName: string) {
     const firstName = getFirstName(contact, brandName);
 
     for (const channel of ["Enoylity Technology", "MHD Tech"] as const) {
-      {
-          const upsertResult = await safeUpsertInstantlyLead({
+      const key = `${channel}::${email}`;
+
+      if (processedChannelEmails.has(key)) continue;
+      processedChannelEmails.add(key);
+
+      const upsertResult = await safeUpsertInstantlyLead({
         channel,
         firstName,
         email,
         companyName: brandName,
         productName,
         relatedVideo: relatedVideoForChannel(channel),
-
         competitor1: "",
         competitor2: "",
-
         pushedStatus: "",
         verificationStatus: shouldMarkVerificationOk(contact)
           ? "Ok"
           : "Pending Verification",
-
         instantlyBounced: "",
         gatewayBounced: "Not Checked",
-
         brandMapId: brandMap._id,
         contactId: contact._id,
-
         raw: {
           source: "worker_exportBrandToInstantlyTabs",
           oldGasEquivalent: "exportToInstantly"
         }
       });
 
-          if (upsertResult.skipped) {
-            skippedAlreadyExported += 1;
-            continue;
-          }
+      if (upsertResult.skipped) {
+        skippedAlreadyExported += 1;
+        continue;
+      }
 
-          if (upsertResult.created) exported += 1;
-          if (upsertResult.updated) updatedExistingUnpushed += 1;
-        }
-
-      exported += 1;
+      if (upsertResult.created) exported += 1;
+      if (upsertResult.updated) updated += 1;
     }
-
   }
 
   return {
     exported,
-    updated: updatedExistingUnpushed,
+    updated,
     skippedAlreadyExported,
     contactsNormalized
   };

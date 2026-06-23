@@ -82,6 +82,45 @@ function ok(res: Response, data: any[]) {
   });
 }
 
+
+function cleanText(value: any) {
+  return String(value || "").trim();
+}
+
+function getInstantlyBouncedStatusForResponse(lead: any) {
+  const value =
+    cleanText(lead.instantlyBounced) ||
+    cleanText(lead.instantlyBounceStatus) ||
+    cleanText(lead.bouncedStatus) ||
+    cleanText(lead.bounceStatus) ||
+    cleanText(lead.raw?.instantlyBounced) ||
+    cleanText(lead.raw?.instantlyBounceStatus) ||
+    cleanText(lead.raw?.bouncedStatus) ||
+    cleanText(lead.raw?.bounceStatus);
+
+  if (value) return value;
+
+  if (lead.isBounced || lead.raw?.isBounced) {
+    const reason = cleanText(lead.bounceReason || lead.raw?.bounceReason);
+    return reason ? `Bounced - ${reason}` : "Bounced";
+  }
+
+  if (cleanText(lead.bouncedAt || lead.raw?.bouncedAt)) {
+    return "Bounced";
+  }
+
+  return "Not bounced";
+}
+
+function normalizeInstantlyLeadForResponse(row: any) {
+  const lead = row?.toObject ? row.toObject() : row;
+
+  return {
+    ...lead,
+    instantlyBounced: getInstantlyBouncedStatusForResponse(lead)
+  };
+}
+
 export async function getEmailDiscoveryRows(req: Request, res: Response) {
   try {
     await paginatedOk(req, res, EmailDiscoveryModel);
@@ -122,7 +161,7 @@ export async function getEnoylityInstantlyRows(req: Request, res: Response) {
       .sort({ updatedAt: -1 })
       .limit(3000);
 
-    ok(res, rows);
+    ok(res, rows.map(normalizeInstantlyLeadForResponse));
   } catch (error: any) {
     res.status(500).json({ success: false, message: error.message });
   }
@@ -136,7 +175,7 @@ export async function getMhdInstantlyRows(req: Request, res: Response) {
       .sort({ updatedAt: -1 })
       .limit(3000);
 
-    ok(res, rows);
+    ok(res, rows.map(normalizeInstantlyLeadForResponse));
   } catch (error: any) {
     res.status(500).json({ success: false, message: error.message });
   }

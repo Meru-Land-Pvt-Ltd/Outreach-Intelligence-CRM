@@ -22,7 +22,14 @@ type InstantlyRow = {
   pushedStatus?: string;
   verificationStatus?: string;
   instantlyBounced?: string;
+  instantlyBounceStatus?: string;
+  bouncedStatus?: string;
+  bounceStatus?: string;
   gatewayBounced?: string;
+  isBounced?: boolean;
+  bounceReason?: string;
+  bouncedAt?: string;
+  raw?: Record<string, any>;
   createdAt?: string;
   updatedAt?: string;
 };
@@ -50,6 +57,31 @@ function clean(value: unknown) {
   }
 
   return text;
+}
+
+function getInstantlyBouncedStatus(row: InstantlyRow) {
+  const value =
+    clean(row.instantlyBounced) ||
+    clean(row.instantlyBounceStatus) ||
+    clean(row.bouncedStatus) ||
+    clean(row.bounceStatus) ||
+    clean(row.raw?.instantlyBounced) ||
+    clean(row.raw?.instantlyBounceStatus) ||
+    clean(row.raw?.bouncedStatus) ||
+    clean(row.raw?.bounceStatus);
+
+  if (value) return value;
+
+  if (row.isBounced || row.raw?.isBounced) {
+    const reason = clean(row.bounceReason || row.raw?.bounceReason);
+    return reason ? `Bounced - ${reason}` : "Bounced";
+  }
+
+  if (clean(row.bouncedAt || row.raw?.bouncedAt)) {
+    return "Bounced";
+  }
+
+  return "Not bounced";
 }
 
 function getClickableUrl(value?: string) {
@@ -118,7 +150,7 @@ function getSearchText(row: InstantlyRow) {
     row.competitor2,
     row.pushedStatus,
     row.verificationStatus,
-    row.instantlyBounced,
+    getInstantlyBouncedStatus(row),
     row.gatewayBounced,
   ]
     .filter(Boolean)
@@ -159,6 +191,8 @@ function StatusBadge({
       "valid",
       "no",
       "false",
+      "safe",
+      "not bounced",
     ].includes(lower) ||
     lower.startsWith("pushed")
   ) {
@@ -281,7 +315,7 @@ export default function MhdInstantlyPage() {
   );
 
   const instantlyBouncedOptions = useMemo(
-    () => getUniqueOptions(rows, (row) => row.instantlyBounced || ""),
+    () => getUniqueOptions(rows, (row) => getInstantlyBouncedStatus(row)),
     [rows]
   );
 
@@ -327,7 +361,7 @@ export default function MhdInstantlyPage() {
 
       const matchesInstantlyBounced =
         instantlyBounced === ALL_VALUE ||
-        clean(row.instantlyBounced) === instantlyBounced;
+        clean(getInstantlyBouncedStatus(row)) === instantlyBounced;
 
       const matchesGatewayBounced =
         gatewayBounced === ALL_VALUE ||
@@ -446,7 +480,7 @@ export default function MhdInstantlyPage() {
         id: "instantlyBounced",
         header: "Instantly Bounced",
         widthClassName: "min-w-[180px]",
-        render: (row) => <StatusBadge value={row.instantlyBounced} />,
+        render: (row) => <StatusBadge value={getInstantlyBouncedStatus(row)} />,
       },
       {
         id: "gatewayBounced",

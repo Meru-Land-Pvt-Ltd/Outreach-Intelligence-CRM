@@ -17,6 +17,81 @@ const InstantlyCampaignModel = InstantlyCampaign as any;
 const PushLogModel = PushLog as any;
 const BounceEventModel = BounceEvent as any;
 
+type InstantlyExportJobStatus = "running" | "completed" | "failed";
+
+type InstantlyExportJob = {
+  status: InstantlyExportJobStatus;
+  message: string;
+  startedAt: string;
+  finishedAt?: string;
+  result?: any;
+  error?: string;
+  progress?: {
+    step?: string;
+    totalBrands?: number;
+    processedBrands?: number;
+    currentBrand?: string;
+    processedContacts?: number;
+    exported?: number;
+    updatedExistingUnpushed?: number;
+    skippedAlreadyExported?: number;
+    contactsNormalized?: number;
+  };
+};
+
+const instantlyExportJobs: Record<string, InstantlyExportJob> = {};
+const INSTANTLY_EXPORT_STALE_MS = 30 * 60 * 1000;
+
+function markInstantlyExportJobStaleIfNeeded(jobId: string, job: InstantlyExportJob) {
+  if (job.status !== "running") return job;
+
+  const startedAtMs = new Date(job.startedAt).getTime();
+
+  if (!Number.isFinite(startedAtMs)) return job;
+
+  if (Date.now() - startedAtMs <= INSTANTLY_EXPORT_STALE_MS) return job;
+
+  instantlyExportJobs[jobId] = {
+    ...job,
+    status: "failed",
+    message:
+      "Export job timed out. Please start Export Leads again; already exported rows will be skipped safely.",
+    finishedAt: new Date().toISOString(),
+    error: "Export job timed out."
+  };
+
+  return instantlyExportJobs[jobId];
+}
+
+function getRunningInstantlyExportJobEntry() {
+  for (const [jobId, job] of Object.entries(instantlyExportJobs)) {
+    const currentJob = markInstantlyExportJobStaleIfNeeded(jobId, job);
+
+    if (currentJob.status === "running") {
+      return [jobId, currentJob] as const;
+    }
+  }
+
+  return null;
+}
+
+function updateInstantlyExportJob(
+  jobId: string | undefined,
+  patch: Partial<InstantlyExportJob>
+) {
+  if (!jobId || !instantlyExportJobs[jobId]) return;
+
+  instantlyExportJobs[jobId] = {
+    ...instantlyExportJobs[jobId],
+    ...patch,
+    progress: {
+      ...(instantlyExportJobs[jobId].progress || {}),
+      ...(patch.progress || {})
+    }
+  };
+}
+
+
 const ENOYLITY_RELATED_FALLBACK =
   "https://www.youtube.com/watch?v=epYZxWOC_KE&list=PL4Bx6jiikXaWgZvxXTDvM3WNwClh690-E&index=1";
 
@@ -98,6 +173,32 @@ const DEFAULT_TEMPLATES: Record<string, any> = {
       "MHD Tech"
   }
 };
+
+
+function getInstantlyBouncedStatusForResponse(lead: any) {
+  const value =
+    cleanText(lead.instantlyBounced) ||
+    cleanText(lead.instantlyBounceStatus) ||
+    cleanText(lead.bouncedStatus) ||
+    cleanText(lead.bounceStatus) ||
+    cleanText(lead.raw?.instantlyBounced) ||
+    cleanText(lead.raw?.instantlyBounceStatus) ||
+    cleanText(lead.raw?.bouncedStatus) ||
+    cleanText(lead.raw?.bounceStatus);
+
+  if (value) return value;
+
+  if (lead.isBounced || lead.raw?.isBounced) {
+    const reason = cleanText(lead.bounceReason || lead.raw?.bounceReason);
+    return reason ? `Bounced - ${reason}` : "Bounced";
+  }
+
+  if (cleanText(lead.bouncedAt || lead.raw?.bouncedAt)) {
+    return "Bounced";
+  }
+
+  return "Not bounced";
+}
 
 function cleanText(value: any) {
   return String(value || "").trim();
@@ -196,9 +297,9 @@ function sanitizeSelectedSenders(channel: string, selectedSenders?: any[]) {
 
   const safeSelectedSenders = Array.isArray(selectedSenders)
     ? selectedSenders
-        .map(cleanEmail)
-        .filter(Boolean)
-        .filter((email) => allowedSet.has(email))
+      .map(cleanEmail)
+      .filter(Boolean)
+      .filter((email) => allowedSet.has(email))
     : [];
 
   return safeSelectedSenders.length > 0 ? safeSelectedSenders : allowedSenders;
@@ -785,8 +886,8 @@ function buildCampaignPayload(input: {
     email_gap: Number(process.env.INSTANTLY_EMAIL_GAP || process.env.EMAIL_GAP_MINUTES || 5),
     random_wait_max: Number(
       process.env.INSTANTLY_RANDOM_WAIT_MAX ||
-        process.env.RANDOM_WAIT_MAX_MINUTES ||
-        3
+      process.env.RANDOM_WAIT_MAX_MINUTES ||
+      3
     ),
     stop_on_reply: true,
     open_tracking: true,
@@ -1103,7 +1204,7 @@ async function askOpenAIForCompetitors(companyName: string) {
   try {
     const response = await axios.post(
       process.env.OPENAI_CHAT_COMPLETIONS_URL ||
-        "https://api.openai.com/v1/chat/completions",
+      "https://api.openai.com/v1/chat/completions",
       {
         model: process.env.OPENAI_MODEL || "gpt-4.1-mini",
         messages: [
@@ -1295,8 +1396,6 @@ async function safeUpsertInstantlyLead(input: any) {
 
   delete payload._id;
 
-  // These fields must NOT be inside $set when they are also inside $setOnInsert.
-  // Also, for existing leads, we should not accidentally clear push/bounce/competitor status.
   const insertDefaults = {
     pushedStatus: cleanText(input.pushedStatus) || "",
     instantlyBounced: cleanText(input.instantlyBounced) || "",
@@ -1320,7 +1419,7 @@ async function safeUpsertInstantlyLead(input: any) {
       },
       {
         upsert: true,
-        new: true,
+        returnDocument: "after",
         setDefaultsOnInsert: true
       }
     );
@@ -1342,7 +1441,7 @@ async function safeUpsertInstantlyLead(input: any) {
       const lead = await InstantlyLeadModel.findOneAndUpdate(
         { channel, email },
         { $set: payload },
-        { new: true }
+        { returnDocument: "after" }
       );
 
       return { lead, created: false, updated: true, skipped: false };
@@ -1352,7 +1451,6 @@ async function safeUpsertInstantlyLead(input: any) {
   }
 }
 
-
 export async function getInstantlyLeads(req: Request, res: Response) {
   try {
     const filter: Record<string, any> = {};
@@ -1361,9 +1459,15 @@ export async function getInstantlyLeads(req: Request, res: Response) {
       filter.channel = String(req.query.channel);
     }
 
+    const requestedLimit = Number(req.query.limit);
+    const limit =
+      Number.isFinite(requestedLimit) && requestedLimit > 0
+        ? Math.min(requestedLimit, 5000)
+        : 2000;
+
     let rows = await InstantlyLeadModel.find(filter)
       .sort({ createdAt: -1 })
-      .limit(2000);
+      .limit(limit);
 
     const missingCompetitorCompanies: string[] = Array.from(
       new Set<string>(
@@ -1382,153 +1486,380 @@ export async function getInstantlyLeads(req: Request, res: Response) {
 
       rows = await InstantlyLeadModel.find(filter)
         .sort({ createdAt: -1 })
-        .limit(2000);
+        .limit(limit);
     }
+
+    const data = rows.map((row: any) => {
+      const lead = row.toObject ? row.toObject() : row;
+
+      return {
+        ...lead,
+        instantlyBounced: getInstantlyBouncedStatusForResponse(lead)
+      };
+    });
+
+    const total = await InstantlyLeadModel.countDocuments(filter);
 
     res.json({
       success: true,
-      count: rows.length,
-      data: rows
+      count: data.length,
+      total,
+      data
     });
   } catch (error: any) {
     res.status(500).json({ success: false, message: error.message });
   }
 }
 
-export async function exportInstantlyLeads(req: Request, res: Response) {
-  try {
-    const brandNameFilter = cleanText(req.body?.brandName);
+async function runInstantlyExportNow(input: { brandName?: string; jobId?: string } = {}) {
+  const brandNameFilter = cleanText(input.brandName);
+  const jobId = input.jobId;
 
-    const brandMaps = await BrandMapModel.find(
-      brandNameFilter ? { brandName: brandNameFilter } : {}
-    ).sort({ createdAt: -1 });
+  updateInstantlyExportJob(jobId, {
+    message: "Loading brands and contacts for export...",
+    progress: { step: "loading" }
+  });
 
-    let exported = 0;
-    let skippedAlreadyExported = 0;
-    let updatedExistingUnpushed = 0;
-    let contactsNormalized = 0;
-    const companiesForCompetitors = new Set<string>();
+  const brandMaps = await BrandMapModel.find(
+    brandNameFilter ? { brandName: brandNameFilter } : {}
+  )
+    .sort({ createdAt: -1 })
+    .lean();
 
-    const existingLeadByChannelEmail: Record<string, any> = {};
-    const processedChannelEmails = new Set<string>();
+  let exported = 0;
+  let skippedAlreadyExported = 0;
+  let updatedExistingUnpushed = 0;
+  let contactsNormalized = 0;
+  let processedContacts = 0;
+  const companiesForCompetitors = new Set<string>();
+  const processedChannelEmails = new Set<string>();
 
-    const existingLeads = await InstantlyLeadModel.find({
-      email: { $exists: true, $nin: ["", null] }
-    });
-
-    for (const lead of existingLeads as any[]) {
-      const email = cleanEmail(lead.email);
-      const channel = cleanText(lead.channel);
-
-      if (email && channel) {
-        existingLeadByChannelEmail[`${channel}::${email}`] = lead;
-      }
-    }
-
-    for (const brandMap of brandMaps as any[]) {
-      const brandName = cleanText(brandMap.brandName);
-      const domain = cleanText(brandMap.domain);
-
-      if (!brandName || !domain) continue;
-
-      const contacts = await ContactModel.find({
-        brandName,
-        domain,
-        email: { $exists: true, $nin: ["", null] },
-        status: { $nin: ["invalid", "bounced", "skipped"] },
-        verificationStatus: { $nin: ["invalid", "bounced"] }
-      }).sort({ createdAt: 1 });
-
-      const productName = getProductNameFromBrandMap(brandMap);
-
-      for (const originalContact of contacts as any[]) {
-        const email = cleanEmail(originalContact.email);
-
-        if (!email) continue;
-
-
-        const contact = await normalizeContactBeforeExport(
-          originalContact,
-          brandName
-        );
-
-        if (
-          !cleanText(originalContact.fullName) ||
-          !cleanText(originalContact.designation || originalContact.role)
-        ) {
-          contactsNormalized += 1;
-        }
-
-        const firstName = getBetterFirstName(contact, brandName);
-
-        for (const channel of ["Enoylity Technology", "MHD Tech"] as const) {
-          const cfg = getChannelConfig(channel);
-
-          {
-          const upsertResult = await safeUpsertInstantlyLead({
-            channel,
-            firstName,
-            email,
-            companyName: brandName,
-            productName,
-            relatedVideo: cfg.relatedVideo,
-
-            competitor1: "",
-            competitor2: "",
-
-            pushedStatus: "",
-            verificationStatus:
-              contact.status === "verified" ||
-              contact.verificationStatus === "valid" ||
-              contact.verificationStatus === "Ok"
-                ? "Ok"
-                : "Pending Verification",
-
-            instantlyBounced: "",
-            gatewayBounced: "Not Checked",
-
-            brandMapId: brandMap._id,
-            contactId: contact._id,
-
-            raw: {
-              source: "exportInstantlyLeads",
-              oldGasEquivalent: "exportToInstantly"
-            }
-          });
-
-          if (upsertResult.skipped) {
-            skippedAlreadyExported += 1;
-            continue;
-          }
-
-          if (upsertResult.created) exported += 1;
-          if (upsertResult.updated) updatedExistingUnpushed += 1;
-        }
-
-          exported += 1;
-          companiesForCompetitors.add(brandName);
-        }
-
-      }
-    }
-
-    const competitorFill = await fillCompetitorsForCompanies(Array.from(companiesForCompetitors));
-
-    res.json({
-      success: true,
+  updateInstantlyExportJob(jobId, {
+    message: `Found ${brandMaps.length} brand(s). Preparing Instantly rows...`,
+    progress: {
+      step: "processing-brands",
+      totalBrands: brandMaps.length,
+      processedBrands: 0,
+      processedContacts,
       exported,
-      competitorsCompanies: competitorFill.companies,
-      competitorsUpdated: competitorFill.updated,
-      skippedAlreadyExported,
       updatedExistingUnpushed,
+      skippedAlreadyExported,
       contactsNormalized
+    }
+  });
+
+  for (let brandIndex = 0; brandIndex < (brandMaps as any[]).length; brandIndex += 1) {
+    const brandMap = (brandMaps as any[])[brandIndex];
+    const brandName = cleanText(brandMap.brandName);
+    const domain = cleanText(brandMap.domain);
+
+    if (!brandName || !domain) {
+      updateInstantlyExportJob(jobId, {
+        progress: { processedBrands: brandIndex + 1 }
+      });
+      continue;
+    }
+
+    updateInstantlyExportJob(jobId, {
+      message: `Exporting ${brandIndex + 1}/${brandMaps.length}: ${brandName}`,
+      progress: {
+        step: "processing-brands",
+        totalBrands: brandMaps.length,
+        processedBrands: brandIndex,
+        currentBrand: brandName,
+        processedContacts,
+        exported,
+        updatedExistingUnpushed,
+        skippedAlreadyExported,
+        contactsNormalized
+      }
     });
-  } catch (error: any) {
-    res.status(500).json({
-      success: false,
-      message: error.message
+
+    const contacts = await ContactModel.find({
+      brandName,
+      domain,
+      email: { $exists: true, $nin: ["", null] },
+      status: { $nin: ["invalid", "bounced", "skipped"] },
+      verificationStatus: { $nin: ["invalid", "bounced"] }
+    })
+      .sort({ createdAt: 1 })
+      .lean();
+
+    const productName = getProductNameFromBrandMap(brandMap);
+    const contactUpdateOps: any[] = [];
+    const leadsByChannel: Record<string, any[]> = {
+      "Enoylity Technology": [],
+      "MHD Tech": []
+    };
+
+    for (const originalContact of contacts as any[]) {
+      const email = cleanEmail(originalContact.email);
+
+      if (!email) continue;
+
+      const currentName = cleanText(originalContact.fullName);
+      const currentRole = cleanText(originalContact.designation || originalContact.role);
+      const inferredName = currentName || inferFullNameFromEmail(email, brandName);
+      const inferredRole = currentRole || inferRoleFromEmail(email);
+      const contactPatch: Record<string, any> = {};
+
+      if (!currentName && inferredName) {
+        contactPatch.fullName = inferredName;
+        contactPatch.firstName = inferredName.split(/\s+/)[0];
+      }
+
+      if (!currentRole && inferredRole) {
+        contactPatch.designation = inferredRole;
+        contactPatch.role = inferredRole;
+      }
+
+      const contact = {
+        ...originalContact,
+        ...contactPatch
+      };
+
+      if (Object.keys(contactPatch).length > 0) {
+        contactsNormalized += 1;
+        contactUpdateOps.push({
+          updateOne: {
+            filter: { _id: originalContact._id },
+            update: { $set: contactPatch }
+          }
+        });
+      }
+
+      const firstName = getBetterFirstName(contact, brandName);
+
+      for (const channel of ["Enoylity Technology", "MHD Tech"] as const) {
+        const key = `${channel}::${email}`;
+
+        if (processedChannelEmails.has(key)) continue;
+        processedChannelEmails.add(key);
+
+        const cfg = getChannelConfig(channel);
+
+        leadsByChannel[channel].push({
+          channel,
+          firstName,
+          email,
+          companyName: brandName,
+          productName,
+          relatedVideo: cfg.relatedVideo,
+          competitor1: "",
+          competitor2: "",
+          pushedStatus: "",
+          verificationStatus:
+            contact.status === "verified" ||
+            contact.verificationStatus === "valid" ||
+            contact.verificationStatus === "Ok"
+              ? "Ok"
+              : "Pending Verification",
+          instantlyBounced: "",
+          gatewayBounced: "Not Checked",
+          brandMapId: brandMap._id,
+          contactId: contact._id,
+          raw: {
+            source: "exportInstantlyLeads",
+            oldGasEquivalent: "exportToInstantly"
+          }
+        });
+      }
+    }
+
+    if (contactUpdateOps.length > 0) {
+      await ContactModel.bulkWrite(contactUpdateOps, { ordered: false });
+    }
+
+    for (const channel of ["Enoylity Technology", "MHD Tech"] as const) {
+      const channelLeads = leadsByChannel[channel];
+
+      if (channelLeads.length === 0) continue;
+
+      const emails = channelLeads.map((lead) => lead.email);
+      const existingLeads = await InstantlyLeadModel.find({
+        channel,
+        email: { $in: emails }
+      })
+        .select("email pushedStatus")
+        .lean();
+
+      const existingByEmail = new Map<string, any>();
+
+      for (const existingLead of existingLeads as any[]) {
+        existingByEmail.set(cleanEmail(existingLead.email), existingLead);
+      }
+
+      const leadWriteOps: any[] = [];
+
+      for (const lead of channelLeads) {
+        const existingLead = existingByEmail.get(lead.email);
+
+        if (existingLead && cleanText(existingLead.pushedStatus)) {
+          skippedAlreadyExported += 1;
+          continue;
+        }
+
+        leadWriteOps.push({
+          updateOne: {
+            filter: { channel, email: lead.email },
+            update: { $set: lead },
+            upsert: true
+          }
+        });
+      }
+
+      if (leadWriteOps.length > 0) {
+        const result = await InstantlyLeadModel.bulkWrite(leadWriteOps, {
+          ordered: false
+        });
+
+        exported += result.upsertedCount || 0;
+        updatedExistingUnpushed += result.matchedCount || 0;
+        companiesForCompetitors.add(brandName);
+      }
+    }
+
+    processedContacts += (contacts as any[]).length;
+
+    updateInstantlyExportJob(jobId, {
+      message: `Exporting ${brandIndex + 1}/${brandMaps.length}: ${brandName}`,
+      progress: {
+        step: "processing-brands",
+        totalBrands: brandMaps.length,
+        processedBrands: brandIndex + 1,
+        currentBrand: brandName,
+        processedContacts,
+        exported,
+        updatedExistingUnpushed,
+        skippedAlreadyExported,
+        contactsNormalized
+      }
     });
   }
+
+  const shouldFillCompetitorsDuringExport = envBool(
+    process.env.INSTANTLY_EXPORT_FILL_COMPETITORS,
+    false
+  );
+
+  let competitorFill = {
+    companies: companiesForCompetitors.size,
+    updated: 0,
+    data: [] as any[]
+  };
+
+  if (shouldFillCompetitorsDuringExport && companiesForCompetitors.size > 0) {
+    updateInstantlyExportJob(jobId, {
+      message: "Filling competitors for exported leads...",
+      progress: { step: "filling-competitors" }
+    });
+
+    competitorFill = await fillCompetitorsForCompanies(
+      Array.from(companiesForCompetitors)
+    );
+  }
+
+  return {
+    success: true,
+    exported,
+    competitorsCompanies: competitorFill.companies,
+    competitorsUpdated: competitorFill.updated,
+    competitorsQueued: shouldFillCompetitorsDuringExport ? 0 : companiesForCompetitors.size,
+    skippedAlreadyExported,
+    updatedExistingUnpushed,
+    contactsNormalized
+  };
+}
+
+export async function exportInstantlyLeads(req: Request, res: Response) {
+  const existingRunningJob = getRunningInstantlyExportJobEntry();
+
+  if (existingRunningJob) {
+    const [jobId, job] = existingRunningJob;
+
+    return res.status(202).json({
+      success: true,
+      jobId,
+      status: job.status,
+      message: job.message || "Export is already running.",
+      startedAt: job.startedAt,
+      progress: job.progress
+    });
+  }
+
+  const jobId = `export_${Date.now()}`;
+  const brandName = cleanText(req.body?.brandName);
+
+  instantlyExportJobs[jobId] = {
+    status: "running",
+    message: "Export started...",
+    startedAt: new Date().toISOString(),
+    progress: { step: "queued" }
+  };
+
+  setImmediate(async () => {
+    try {
+      const result = await runInstantlyExportNow({
+        brandName,
+        jobId
+      });
+
+      instantlyExportJobs[jobId] = {
+        ...instantlyExportJobs[jobId],
+        status: "completed",
+        message: "Export complete.",
+        finishedAt: new Date().toISOString(),
+        result,
+        progress: {
+          ...(instantlyExportJobs[jobId].progress || {}),
+          step: "completed"
+        }
+      };
+    } catch (error: any) {
+      instantlyExportJobs[jobId] = {
+        ...instantlyExportJobs[jobId],
+        status: "failed",
+        message: error.message || "Export failed.",
+        finishedAt: new Date().toISOString(),
+        error: error.message || String(error),
+        progress: {
+          ...(instantlyExportJobs[jobId].progress || {}),
+          step: "failed"
+        }
+      };
+
+      console.error("[Instantly Export Job Failed]", error);
+    }
+  });
+
+  return res.status(202).json({
+    success: true,
+    jobId,
+    status: "running",
+    message: "Export started in background.",
+    startedAt: instantlyExportJobs[jobId].startedAt,
+    progress: instantlyExportJobs[jobId].progress
+  });
+}
+
+export async function getInstantlyExportStatus(req: Request, res: Response) {
+  const jobId = String(req.params.jobId || "");
+  const job = instantlyExportJobs[jobId];
+
+  if (!job) {
+    return res.status(404).json({
+      success: false,
+      message: "Export job not found. If the backend was restarted, please start Export Leads again."
+    });
+  }
+
+  const currentJob = markInstantlyExportJobStaleIfNeeded(jobId, job);
+
+  return res.json({
+    success: true,
+    jobId,
+    ...currentJob
+  });
 }
 
 export async function getTemplates(req: Request, res: Response) {
@@ -1570,7 +1901,7 @@ export async function saveTemplate(req: Request, res: Response) {
       },
       {
         upsert: true,
-        new: true
+        returnDocument: "after"
       }
     );
 
@@ -1605,17 +1936,33 @@ export async function getSenders(req: Request, res: Response) {
 export async function getImportedLeads(req: Request, res: Response) {
   try {
     const channel = cleanText(req.query.channel || "Enoylity Technology");
-    const limit = Math.min(Number(req.query.limit || 5), 200);
+    const requestedLimit = Number(req.query.limit);
+    const limit =
+      Number.isFinite(requestedLimit) && requestedLimit > 0
+        ? Math.min(requestedLimit, 5000)
+        : 2000;
 
     const rows = await InstantlyLeadModel.find({ channel })
       .sort({ createdAt: -1 })
       .limit(limit);
 
+    const data = rows.map((row: any) => {
+      const lead = row.toObject ? row.toObject() : row;
+
+      return {
+        ...lead,
+        instantlyBounced: getInstantlyBouncedStatusForResponse(lead)
+      };
+    });
+
+    const total = await InstantlyLeadModel.countDocuments({ channel });
+
     res.json({
       success: true,
-      count: rows.length,
-      data: rows,
-      leads: rows
+      count: data.length,
+      total,
+      data,
+      leads: data
     });
   } catch (error: any) {
     res.status(500).json({
@@ -2019,7 +2366,7 @@ async function getCampaignIdsForBounceMode(mode: string): Promise<string[]> {
 
 export async function pullBouncedFromInstantly(req: Request, res: Response) {
   try {
-    const mode = req.body?.mode === "all" ? "all" : "crm";
+    const mode = req.body?.mode === "crm" ? "crm" : "all";
     const campaignIds = await getCampaignIdsForBounceMode(mode);
 
     if (campaignIds.length === 0) {
@@ -2054,7 +2401,9 @@ export async function pullBouncedFromInstantly(req: Request, res: Response) {
         const items: any[] = Array.isArray(result?.items) ? result.items : [];
 
         for (const item of items) {
-          const email = cleanEmail(item.email);
+          const email = cleanEmail(
+            item.email || item?.lead?.email || item?.data?.email
+          );
 
           if (!email) continue;
 
@@ -2064,7 +2413,7 @@ export async function pullBouncedFromInstantly(req: Request, res: Response) {
             email,
             campaignId,
             eventType: "bounced",
-            reason: item.status || "FILTER_VAL_BOUNCED",
+            reason: item.status || item.reason || "FILTER_VAL_BOUNCED",
             source: mode,
             raw: item
           });
@@ -2131,9 +2480,9 @@ export async function instantlyWebhook(req: Request, res: Response) {
 
     const campaignId = String(
       payload.campaign_id ||
-        payload.campaignId ||
-        payload?.campaign?.id ||
-        ""
+      payload.campaignId ||
+      payload?.campaign?.id ||
+      ""
     );
 
     if (eventType.includes("bounce") && email) {

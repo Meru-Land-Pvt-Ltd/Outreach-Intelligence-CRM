@@ -41,7 +41,14 @@ type ImportedLead = {
   pushedStatus?: string;
   verificationStatus?: string;
   instantlyBounced?: string;
+  instantlyBounceStatus?: string;
+  bouncedStatus?: string;
+  bounceStatus?: string;
   gatewayBounced?: string;
+  isBounced?: boolean;
+  bounceReason?: string;
+  bouncedAt?: string;
+  raw?: Record<string, any>;
 };
 
 type TemplatePreview = {
@@ -62,6 +69,19 @@ type ExportResult = {
   skippedPushedLeads?: number;
   contactsNormalized?: number;
   contactsFixed?: number;
+  competitorsQueued?: number;
+};
+
+type ExportProgress = {
+  step?: string;
+  totalBrands?: number;
+  processedBrands?: number;
+  currentBrand?: string;
+  processedContacts?: number;
+  exported?: number;
+  updatedExistingUnpushed?: number;
+  skippedAlreadyExported?: number;
+  contactsNormalized?: number;
 };
 
 type ExportStatusResponse = {
@@ -71,6 +91,7 @@ type ExportStatusResponse = {
   message?: string;
   error?: string;
   result?: ExportResult;
+  progress?: ExportProgress;
 };
 
 const CHANNELS: Channel[] = ["Enoylity Technology", "MHD Tech"];
@@ -114,6 +135,31 @@ function plusDays(days: number) {
 
 function clean(value: any) {
   return String(value || "").trim();
+}
+
+function getInstantlyBouncedStatus(lead: ImportedLead) {
+  const value =
+    clean(lead.instantlyBounced) ||
+    clean(lead.instantlyBounceStatus) ||
+    clean(lead.bouncedStatus) ||
+    clean(lead.bounceStatus) ||
+    clean(lead.raw?.instantlyBounced) ||
+    clean(lead.raw?.instantlyBounceStatus) ||
+    clean(lead.raw?.bouncedStatus) ||
+    clean(lead.raw?.bounceStatus);
+
+  if (value) return value;
+
+  if (lead.isBounced || lead.raw?.isBounced) {
+    const reason = clean(lead.bounceReason || lead.raw?.bounceReason);
+    return reason ? `Bounced - ${reason}` : "Bounced";
+  }
+
+  if (clean(lead.bouncedAt || lead.raw?.bouncedAt)) {
+    return "Bounced";
+  }
+
+  return "Not bounced";
 }
 
 function toChannel(value: string): Channel {
@@ -168,6 +214,7 @@ function buildExportSuccessMessage(result: ExportResult | undefined) {
     "contactsNormalized",
     "contactsFixed",
   ]);
+  const competitorsQueued = getExportNumber(result, ["competitorsQueued"]);
 
   return (
     "Export complete. New rows: " +
@@ -177,8 +224,42 @@ function buildExportSuccessMessage(result: ExportResult | undefined) {
     ", skipped already pushed: " +
     skippedAlreadyPushed +
     ", contacts fixed: " +
-    contactsFixed
+    contactsFixed +
+    (competitorsQueued > 0
+      ? ", competitors queued: " + competitorsQueued
+      : "")
   );
+}
+
+function buildExportRunningMessage(statusResponse: ExportStatusResponse) {
+  const progress = statusResponse.progress || {};
+  const base = statusResponse.message || "Export is running in background...";
+
+  if (progress.totalBrands && progress.totalBrands > 0) {
+    const processedBrands = Number(progress.processedBrands || 0);
+    const processedContacts = Number(progress.processedContacts || 0);
+    const exported = Number(progress.exported || 0);
+    const updated = Number(progress.updatedExistingUnpushed || 0);
+    const skipped = Number(progress.skippedAlreadyExported || 0);
+
+    return (
+      base +
+      " Brands " +
+      processedBrands +
+      "/" +
+      progress.totalBrands +
+      ", contacts scanned: " +
+      processedContacts +
+      ", new rows: " +
+      exported +
+      ", updated: " +
+      updated +
+      ", skipped: " +
+      skipped
+    );
+  }
+
+  return base;
 }
 
 function FieldLabel({
@@ -592,7 +673,7 @@ function ImportedLeadsTable({
                     </td>
 
                     <td className="border-b border-slate-100 px-4 py-4 text-sm text-slate-700">
-                      {lead.instantlyBounced || "-"}
+                      {getInstantlyBouncedStatus(lead)}
                     </td>
 
                     <td className="border-b border-slate-100 px-4 py-4 text-sm text-slate-700">
@@ -627,6 +708,7 @@ export default function InstantlyControlPanelPage() {
   const [message, setMessage] = useState("");
   const [messageType, setMessageType] = useState<MessageType>("info");
   const [loadingAction, setLoadingAction] = useState("");
+  const [leadsExported, setLeadsExported] = useState(false);
 
   const [senderOptions, setSenderOptions] = useState<Record<Channel, string[]>>({
     "Enoylity Technology": FALLBACK_SENDERS["Enoylity Technology"],
@@ -734,13 +816,15 @@ export default function InstantlyControlPanelPage() {
       const response = await apiGet(
         `/instantly/imported-leads?channel=${encodeURIComponent(
           channel
-        )}&limit=`
+        )}&limit=2000`
       );
 
       const rows = response?.data || response?.leads || [];
       setImportedLeads(rows);
-} catch {
+      setLeadsExported(rows.length > 0);
+    } catch {
       setImportedLeads([]);
+      setLeadsExported(false);
     }
 
     setLoadingLeads(false);
@@ -821,7 +905,7 @@ export default function InstantlyControlPanelPage() {
 
       if (statusResponse.status === "running") {
         setMessageType("info");
-        setMessage("Export is running in background...");
+        setMessage(buildExportRunningMessage(statusResponse));
         continue;
       }
 
@@ -840,9 +924,6 @@ export default function InstantlyControlPanelPage() {
       "Export is taking too long. Please refresh after a few minutes."
     );
   }
-
-  
-
 
   async function exportLeads() {
     setLoadingAction("Export Leads");
@@ -867,6 +948,7 @@ export default function InstantlyControlPanelPage() {
         return;
       }
 
+      setLeadsExported(true);
       setSelectedPreviewKey("");
       setSelectedPreviewLead(null);
       setTemplatePreview(null);
@@ -883,6 +965,32 @@ export default function InstantlyControlPanelPage() {
 
     setLoadingAction("");
   }
+
+  async function pullBounced() {
+    await runAction("Pull Bounced", async () => {
+      const response: any = await apiPost("/instantly/pull-bounced", {
+        mode: "all",
+      });
+
+      if (response?.success) {
+        await loadImportedLeads(pushForm.channel);
+
+        return {
+          success: true,
+          message:
+            "Instantly bounced statuses refreshed. Campaigns scanned: " +
+            (response.campaignsScanned || 0) +
+            ", bounced emails: " +
+            (response.uniqueBouncedEmails || 0) +
+            ", rows updated: " +
+            (response.totalUpdated || 0),
+        };
+      }
+
+      return response;
+    });
+  }
+
 
   async function pushSingle() {
     if (!hasPreparedLeads) {
@@ -1022,6 +1130,18 @@ export default function InstantlyControlPanelPage() {
               : hasPreparedLeads
                 ? "Re-export Leads"
                 : "Export Leads"}
+          </Button>
+
+          <Button
+            type="button"
+            onClick={pullBounced}
+            disabled={busy}
+            className="h-12 rounded-xl !border-emerald-200 !bg-emerald-50 !text-emerald-700 hover:!bg-emerald-100 hover:!text-emerald-800 disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            <CheckCircle2 className="mr-2 h-4 w-4" />
+            {loadingAction === "Pull Bounced"
+              ? "Refreshing..."
+              : "Pull Bounced Status"}
           </Button>
         </div>
 
