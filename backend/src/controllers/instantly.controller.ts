@@ -1215,7 +1215,7 @@ async function createAndPushCampaign(input: {
     );
 
     totalPushed += 1;
-    await new Promise((resolve) => setTimeout(resolve, 300));
+    await new Promise((resolve) => setTimeout(resolve, 50));
   }
 
   const campaignLaunchStatus = getCampaignLaunchStatus(input.startDate);
@@ -1542,7 +1542,7 @@ export async function fillCompetitorsForCompanies(companyNames: string[]) {
       });
     }
 
-    await new Promise((resolve) => setTimeout(resolve, 300));
+    await new Promise((resolve) => setTimeout(resolve, 50));
   }
 
   const stillEmpty = await InstantlyLeadModel.countDocuments(
