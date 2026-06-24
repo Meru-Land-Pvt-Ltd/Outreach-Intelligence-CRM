@@ -15,7 +15,8 @@ import {
   instantlyWebhook,
   pullBouncedFromInstantly,
   pushToInstantly,
-  saveTemplate
+  saveTemplate,
+  verifyPendingInstantlyLeads
 } from "../controllers/instantly.controller";
 
 const router = Router();
@@ -34,6 +35,9 @@ router.get("/templates", getTemplates);
 router.post("/templates", saveTemplate);
 
 router.post("/competitors/fill", fillCompetitors);
+
+router.post("/verify-pending", verifyPendingInstantlyLeads);
+router.post("/verification/run", verifyPendingInstantlyLeads);
 
 router.post("/push", pushToInstantly);
 

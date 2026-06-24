@@ -17,76 +17,73 @@ const InstantlyCampaignModel = InstantlyCampaign as any;
 const PushLogModel = PushLog as any;
 const BounceEventModel = BounceEvent as any;
 
-type InstantlyExportJobStatus = "running" | "completed" | "failed";
+const INSTANTLY_EXPORT_JOB_TIMEOUT_MS = Number(
+  process.env.INSTANTLY_EXPORT_JOB_TIMEOUT_MS || 30 * 60 * 1000
+);
+
+type InstantlyExportJobProgress = {
+  totalBrands?: number;
+  processedBrands?: number;
+  processedContacts?: number;
+  newRows?: number;
+  updatedExistingUnpushed?: number;
+  skippedAlreadyPushed?: number;
+  verifiedContacts?: number;
+  skippedInvalidVerification?: number;
+  competitorsCompanies?: number;
+  competitorsUpdated?: number;
+  pendingVerified?: number;
+  pendingRejected?: number;
+  pendingVerificationFailed?: number;
+  bouncedCampaignsScanned?: number;
+  bouncedRowsUpdated?: number;
+};
 
 type InstantlyExportJob = {
-  status: InstantlyExportJobStatus;
+  status: "running" | "completed" | "failed";
   message: string;
   startedAt: string;
   finishedAt?: string;
   result?: any;
   error?: string;
-  progress?: {
-    step?: string;
-    totalBrands?: number;
-    processedBrands?: number;
-    currentBrand?: string;
-    processedContacts?: number;
-    exported?: number;
-    updatedExistingUnpushed?: number;
-    skippedAlreadyExported?: number;
-    contactsNormalized?: number;
-  };
+  progress?: InstantlyExportJobProgress;
 };
 
 const instantlyExportJobs: Record<string, InstantlyExportJob> = {};
-const INSTANTLY_EXPORT_STALE_MS = 30 * 60 * 1000;
 
-function markInstantlyExportJobStaleIfNeeded(jobId: string, job: InstantlyExportJob) {
-  if (job.status !== "running") return job;
+function isExportJobTimedOut(job: InstantlyExportJob) {
+  if (job.status !== "running") return false;
 
-  const startedAtMs = new Date(job.startedAt).getTime();
+  const startedAt = new Date(job.startedAt).getTime();
 
-  if (!Number.isFinite(startedAtMs)) return job;
+  if (!Number.isFinite(startedAt)) return false;
 
-  if (Date.now() - startedAtMs <= INSTANTLY_EXPORT_STALE_MS) return job;
-
-  instantlyExportJobs[jobId] = {
-    ...job,
-    status: "failed",
-    message:
-      "Export job timed out. Please start Export Leads again; already exported rows will be skipped safely.",
-    finishedAt: new Date().toISOString(),
-    error: "Export job timed out."
-  };
-
-  return instantlyExportJobs[jobId];
+  return Date.now() - startedAt > INSTANTLY_EXPORT_JOB_TIMEOUT_MS;
 }
 
-function getRunningInstantlyExportJobEntry() {
+function markTimedOutExportJobs() {
   for (const [jobId, job] of Object.entries(instantlyExportJobs)) {
-    const currentJob = markInstantlyExportJobStaleIfNeeded(jobId, job);
+    if (!isExportJobTimedOut(job)) continue;
 
-    if (currentJob.status === "running") {
-      return [jobId, currentJob] as const;
-    }
+    instantlyExportJobs[jobId] = {
+      ...job,
+      status: "failed",
+      message: "Export timed out. Please start export again.",
+      finishedAt: new Date().toISOString(),
+      error: "Export timed out before completion."
+    };
   }
-
-  return null;
 }
 
-function updateInstantlyExportJob(
-  jobId: string | undefined,
-  patch: Partial<InstantlyExportJob>
-) {
+function updateExportJobProgress(jobId: string | undefined, patch: Partial<InstantlyExportJobProgress>, message?: string) {
   if (!jobId || !instantlyExportJobs[jobId]) return;
 
   instantlyExportJobs[jobId] = {
     ...instantlyExportJobs[jobId],
-    ...patch,
+    message: message || instantlyExportJobs[jobId].message,
     progress: {
       ...(instantlyExportJobs[jobId].progress || {}),
-      ...(patch.progress || {})
+      ...patch
     }
   };
 }
@@ -690,6 +687,45 @@ function isVerificationRejected(value: any) {
   ].includes(status);
 }
 
+function isVerificationAccepted(value: any) {
+  const status = normalizeLeadStatus(value);
+
+  return [
+    "ok",
+    "valid",
+    "verified",
+    "deliverable",
+    "good",
+    "catch-all",
+    "catchall",
+    "unknown"
+  ].includes(status);
+}
+
+function normalizeVerificationStatusForStorage(value: any) {
+  const status = normalizeLeadStatus(value);
+
+  if (!status || status === "-") return "Pending Verification";
+  if (["ok", "valid", "verified", "deliverable", "good"].includes(status)) return "Ok";
+  if (["invalid", "bad", "undeliverable"].includes(status)) return "Invalid";
+  if (status.includes("catch")) return "Catch-all";
+  if (status.includes("disposable")) return "Disposable";
+  if (["pending", "pending-verification", "verification-pending", "not-verified", "not-checked"].includes(status)) {
+    return "Pending Verification";
+  }
+
+  return cleanText(value) || "Pending Verification";
+}
+
+function shouldVerifyOnExport() {
+  return envBool(process.env.INSTANTLY_VERIFY_ON_EXPORT, true);
+}
+
+function exportVerificationLimit() {
+  const value = Number(process.env.INSTANTLY_EXPORT_VERIFY_LIMIT || 5000);
+  return Number.isFinite(value) && value > 0 ? value : 5000;
+}
+
 function isBounceRejected(value: any) {
   const status = normalizeLeadStatus(value);
 
@@ -1038,6 +1074,11 @@ async function createAndPushCampaign(input: {
     }
   }
 
+  await runInstantlyBackendMaintenance({
+    channel: input.channel,
+    reason: "before-push"
+  });
+
   const { leadsToPush, leadIds } = await getEligibleLeads({
     channel: input.channel,
     numLeads: input.numLeads,
@@ -1179,27 +1220,71 @@ async function createAndPushCampaign(input: {
   };
 }
 
-async function askOpenAIForCompetitors(companyName: string) {
-  const key = process.env.OPENAI_API_KEY || "";
+function parseJsonFromAiText(text: string) {
+  const cleaned = String(text || "")
+    .replace(/^```json/i, "")
+    .replace(/^```/i, "")
+    .replace(/```$/i, "")
+    .trim();
 
-  if (!key) {
-    return {
-      competitor1: "",
-      competitor2: ""
-    };
+  const match = cleaned.match(/\{[\s\S]*\}/);
+  return match ? JSON.parse(match[0]) : JSON.parse(cleaned);
+}
+
+function parseCompetitorBatchResponse(text: string, requestedCompanies: string[]) {
+  const parsed = parseJsonFromAiText(text);
+  const rows = Array.isArray(parsed?.results)
+    ? parsed.results
+    : Array.isArray(parsed)
+      ? parsed
+      : parsed?.competitor1 || parsed?.competitor2
+        ? [{ brand: requestedCompanies[0], ...parsed }]
+        : [];
+
+  const byCompany: Record<string, { competitor1: string; competitor2: string }> = {};
+
+  for (const row of rows) {
+    const brand = cleanText(
+      row.brand || row.companyName || row.company || row.name || row.Brand
+    );
+
+    if (!brand) continue;
+
+    const competitor1 = cleanText(
+      row.competitor1 || row.Competitor1 || row["Competitor 1"]
+    );
+    const competitor2 = cleanText(
+      row.competitor2 || row.Competitor2 || row["Competitor 2"]
+    );
+
+    if (!competitor1 && !competitor2) continue;
+
+    byCompany[brand.toLowerCase()] = { competitor1, competitor2 };
+  }
+
+  return byCompany;
+}
+
+async function askOpenAIForCompetitorBatch(companyNames: string[]) {
+  const key = process.env.OPENAI_API_KEY || "";
+  const cleanCompanies = Array.from(
+    new Set(companyNames.map(cleanText).filter(Boolean))
+  );
+
+  if (!key || cleanCompanies.length === 0) {
+    return {} as Record<string, { competitor1: string; competitor2: string }>;
   }
 
   const prompt =
-    "Find 2 direct competitor brands for this company.\n\n" +
-    "Company: " +
-    companyName +
-    "\n\n" +
-    "Rules:\n" +
+    "For each company below, find 2 direct competitor brands in the same product category.\n\n" +
+    cleanCompanies.map((name, index) => `${index + 1}. ${name}`).join("\n") +
+    "\n\nRules:\n" +
     "1. Return direct competitors only.\n" +
-    "2. Return brand names only.\n" +
-    "3. No explanations.\n" +
-    "4. Output exactly JSON like this:\n" +
-    '{"competitor1":"Brand A","competitor2":"Brand B"}';
+    "2. Return brand names only, not product names.\n" +
+    "3. Do not return the original company as its own competitor.\n" +
+    "4. No explanations.\n" +
+    "5. Output exactly valid JSON in this shape:\n" +
+    '{"results":[{"brand":"Company Name","competitor1":"Brand A","competitor2":"Brand B"}]}';
 
   try {
     const response = await axios.post(
@@ -1229,33 +1314,107 @@ async function askOpenAIForCompetitors(companyName: string) {
       }
     );
 
-    let text = String(response.data?.choices?.[0]?.message?.content || "").trim();
-
-    text = text
-      .replace(/^```json/i, "")
-      .replace(/^```/i, "")
-      .replace(/```$/i, "")
-      .trim();
-
-    const match = text.match(/\{[\s\S]*\}/);
-    const json = match ? JSON.parse(match[0]) : JSON.parse(text);
-
-    return {
-      competitor1: cleanText(json.competitor1),
-      competitor2: cleanText(json.competitor2)
-    };
+    const text = String(response.data?.choices?.[0]?.message?.content || "").trim();
+    return parseCompetitorBatchResponse(text, cleanCompanies);
   } catch (error: any) {
     console.error(
-      "Competitor OpenAI failed for",
-      companyName,
+      "Competitor OpenAI batch failed:",
       error?.response?.data || error.message
     );
 
-    return {
-      competitor1: "",
-      competitor2: ""
-    };
+    return {} as Record<string, { competitor1: string; competitor2: string }>;
   }
+}
+
+async function getCompetitorFallbackFromBrandMap(companyName: string) {
+  const company = cleanText(companyName);
+
+  if (!company) {
+    return { competitor1: "", competitor2: "" };
+  }
+
+  try {
+    const brandMap = await BrandMapModel.findOne({
+      brandName: new RegExp(`^${company.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`, "i")
+    }).lean();
+
+    const candidates: string[] = [];
+
+    if (brandMap?.niche) {
+      const related = await BrandMapModel.find({
+        niche: brandMap.niche,
+        brandName: { $exists: true, $nin: ["", null] }
+      })
+        .sort({ channelCount: -1, mostRecentSponsorshipDate: -1, updatedAt: -1 })
+        .limit(10)
+        .lean();
+
+      for (const row of related as any[]) {
+        const name = cleanText(row.brandName);
+
+        if (!name || name.toLowerCase() === company.toLowerCase()) continue;
+        if (candidates.map((item) => item.toLowerCase()).includes(name.toLowerCase())) continue;
+
+        candidates.push(name);
+        if (candidates.length >= 2) break;
+      }
+    }
+
+    const seedBrand = cleanText(brandMap?.seedBrandName);
+
+    if (
+      seedBrand &&
+      seedBrand.toLowerCase() !== company.toLowerCase() &&
+      !candidates.map((item) => item.toLowerCase()).includes(seedBrand.toLowerCase())
+    ) {
+      candidates.push(seedBrand);
+    }
+
+    return {
+      competitor1: candidates[0] || "",
+      competitor2: candidates[1] || ""
+    };
+  } catch (error: any) {
+    console.error("Competitor fallback failed for", companyName, error.message);
+    return { competitor1: "", competitor2: "" };
+  }
+}
+
+async function askOpenAIForCompetitors(companyName: string) {
+  const byCompany = await askOpenAIForCompetitorBatch([companyName]);
+  const competitors = byCompany[cleanText(companyName).toLowerCase()];
+
+  if (competitors?.competitor1 || competitors?.competitor2) {
+    return competitors;
+  }
+
+  return getCompetitorFallbackFromBrandMap(companyName);
+}
+
+function missingCompetitorQuery(extra: Record<string, any> = {}) {
+  const query: Record<string, any> = { ...extra };
+  const companyFilter = extra.companyName;
+
+  if (companyFilter && typeof companyFilter === "object" && !Array.isArray(companyFilter)) {
+    query.companyName = { $exists: true, $nin: ["", null], ...companyFilter };
+  } else if (companyFilter) {
+    query.companyName = companyFilter;
+  } else {
+    query.companyName = { $exists: true, $nin: ["", null] };
+  }
+
+  query.$or = [
+    { competitor1: { $exists: false } },
+    { competitor1: "" },
+    { competitor1: null },
+    { competitor1: "-" },
+    { competitor2: { $exists: false } },
+    { competitor2: "" },
+    { competitor2: null },
+    { competitor2: "-" }
+  ];
+
+  return query;
 }
 
 async function fillCompetitorsForCompanies(companyNames: string[]) {
@@ -1267,79 +1426,88 @@ async function fillCompetitorsForCompanies(companyNames: string[]) {
     )
   );
 
-  let updated = 0;
-  const results: any[] = [];
-
-  for (const companyName of uniqueCompanies) {
-    const needsUpdate = await InstantlyLeadModel.countDocuments({
-      companyName,
-      $or: [
-        { competitor1: { $exists: false } },
-        { competitor1: "" },
-        { competitor1: null },
-        { competitor1: "-" },
-        { competitor2: { $exists: false } },
-        { competitor2: "" },
-        { competitor2: null },
-        { competitor2: "-" }
-      ]
-    });
-
-    if (!needsUpdate) {
-      continue;
-    }
-
-    const competitors = await askOpenAIForCompetitors(companyName);
-
-    if (!cleanText(competitors.competitor1) && !cleanText(competitors.competitor2)) {
-      results.push({
-        companyName,
-        competitor1: "",
-        competitor2: "",
-        updated: 0,
-        skipped: true
-      });
-
-      continue;
-    }
-
-    const result = await InstantlyLeadModel.updateMany(
-      {
-        companyName,
-        $or: [
-          { competitor1: { $exists: false } },
-          { competitor1: "" },
-          { competitor1: null },
-          { competitor1: "-" },
-          { competitor2: { $exists: false } },
-          { competitor2: "" },
-          { competitor2: null },
-          { competitor2: "-" }
-        ]
-      },
-      {
-        $set: {
-          competitor1: cleanText(competitors.competitor1),
-          competitor2: cleanText(competitors.competitor2)
-        }
-      }
-    );
-
-    updated += result.modifiedCount || 0;
-
-    results.push({
-      companyName,
-      competitor1: competitors.competitor1,
-      competitor2: competitors.competitor2,
-      updated: result.modifiedCount || 0
-    });
-
-    await new Promise((resolve) => setTimeout(resolve, 250));
+  if (uniqueCompanies.length === 0) {
+    return { companies: 0, updated: 0, failed: 0, stillEmpty: 0, data: [] as any[] };
   }
 
+  const rowsNeedingCompetitors = await InstantlyLeadModel.find(
+    missingCompetitorQuery({ companyName: { $in: uniqueCompanies } })
+  )
+    .select("companyName")
+    .lean();
+
+  const companiesToFill = Array.from(
+    new Set(
+      (rowsNeedingCompetitors as any[])
+        .map((row) => cleanText(row.companyName))
+        .filter(Boolean)
+    )
+  );
+
+  let updated = 0;
+  let failed = 0;
+  const results: any[] = [];
+  const batchSize = Math.max(Number(process.env.COMPETITOR_FILL_BATCH_SIZE || 20), 1);
+
+  for (let index = 0; index < companiesToFill.length; index += batchSize) {
+    const batch = companiesToFill.slice(index, index + batchSize);
+    const byCompany = await askOpenAIForCompetitorBatch(batch);
+
+    for (const companyName of batch) {
+      let competitors = byCompany[companyName.toLowerCase()];
+
+      if (!competitors?.competitor1 && !competitors?.competitor2) {
+        competitors = await getCompetitorFallbackFromBrandMap(companyName);
+      }
+
+      const competitor1 = cleanText(competitors?.competitor1);
+      const competitor2 = cleanText(competitors?.competitor2);
+
+      if (!competitor1 && !competitor2) {
+        failed += 1;
+        results.push({
+          companyName,
+          competitor1: "",
+          competitor2: "",
+          updated: 0,
+          skipped: true,
+          reason: "competitors_not_found"
+        });
+        continue;
+      }
+
+      const result = await InstantlyLeadModel.updateMany(
+        missingCompetitorQuery({ companyName }),
+        {
+          $set: {
+            competitor1,
+            competitor2
+          }
+        }
+      );
+
+      updated += result.modifiedCount || 0;
+
+      results.push({
+        companyName,
+        competitor1,
+        competitor2,
+        updated: result.modifiedCount || 0
+      });
+    }
+
+    await new Promise((resolve) => setTimeout(resolve, 300));
+  }
+
+  const stillEmpty = await InstantlyLeadModel.countDocuments(
+    missingCompetitorQuery({ companyName: { $in: uniqueCompanies } })
+  );
+
   return {
-    companies: uniqueCompanies.length,
+    companies: companiesToFill.length,
     updated,
+    failed,
+    stillEmpty,
     data: results
   };
 }
@@ -1465,29 +1633,14 @@ export async function getInstantlyLeads(req: Request, res: Response) {
         ? Math.min(requestedLimit, 5000)
         : 2000;
 
-    let rows = await InstantlyLeadModel.find(filter)
+    const rows = await InstantlyLeadModel.find(filter)
       .sort({ createdAt: -1 })
       .limit(limit);
 
-    const missingCompetitorCompanies: string[] = Array.from(
-      new Set<string>(
-        (rows as any[])
-          .filter(
-            (row: any) =>
-              !cleanText(row.competitor1) || !cleanText(row.competitor2)
-          )
-          .map((row: any) => cleanText(row.companyName))
-          .filter((companyName: string) => companyName.length > 0)
-      )
-    );
-
-    if (missingCompetitorCompanies.length > 0) {
-      await fillCompetitorsForCompanies(missingCompetitorCompanies);
-
-      rows = await InstantlyLeadModel.find(filter)
-        .sort({ createdAt: -1 })
-        .limit(limit);
-    }
+    scheduleInstantlyBackendMaintenance({
+      channel: cleanText(filter.channel),
+      reason: "leads-read"
+    });
 
     const data = rows.map((row: any) => {
       const lead = row.toObject ? row.toObject() : row;
@@ -1511,121 +1664,504 @@ export async function getInstantlyLeads(req: Request, res: Response) {
   }
 }
 
+type ExportVerificationCacheValue = {
+  status: string;
+  raw?: any;
+};
+
+async function resolveVerificationForExport(input: {
+  contact: any;
+  email: string;
+  cache: Record<string, ExportVerificationCacheValue>;
+  verifyOnExport: boolean;
+  canVerifyMore: () => boolean;
+  onVerified: () => void;
+}) {
+  const existingStatus = normalizeVerificationStatusForStorage(
+    input.contact.verificationStatus || input.contact.status
+  );
+
+  if (isVerificationAccepted(existingStatus) || isVerificationRejected(existingStatus)) {
+    return existingStatus;
+  }
+
+  if (!input.verifyOnExport || !input.canVerifyMore()) {
+    return "Pending Verification";
+  }
+
+  const cached = input.cache[input.email];
+
+  if (cached) {
+    return cached.status;
+  }
+
+  try {
+    const verifyResult = await verifyEmailWithMillionVerifier(input.email);
+    const status = normalizeVerificationStatusForStorage(verifyResult.status);
+
+    input.cache[input.email] = {
+      status,
+      raw: verifyResult.raw
+    };
+
+    input.onVerified();
+
+    if (input.contact?._id) {
+      await ContactModel.updateOne(
+        { _id: input.contact._id },
+        {
+          $set: {
+            verificationStatus: status,
+            raw: {
+              ...(input.contact.raw || {}),
+              millionVerifier: verifyResult.raw
+            }
+          }
+        }
+      );
+    }
+
+    await new Promise((resolve) => setTimeout(resolve, 120));
+
+    return status;
+  } catch (error: any) {
+    console.error("Export verification failed for", input.email, error?.message || error);
+    return "Pending Verification";
+  }
+}
+
+
+function buildPendingVerificationFilter(channel?: string) {
+  const filter: Record<string, any> = {
+    email: { $exists: true, $nin: ["", null] },
+    $or: [
+      { verificationStatus: { $exists: false } },
+      { verificationStatus: "" },
+      { verificationStatus: null },
+      { verificationStatus: "Pending Verification" },
+      { verificationStatus: "pending" },
+      { verificationStatus: "pending verification" },
+      { verificationStatus: "Not Verified" },
+      { verificationStatus: "Not Checked" },
+      { verificationStatus: "Unknown" }
+    ]
+  };
+
+  if (channel) filter.channel = channel;
+
+  return filter;
+}
+
+async function verifyPendingInstantlyLeadsInternal(input: {
+  channel?: string;
+  limit?: number;
+} = {}) {
+  const requestedLimit = Number(input.limit || process.env.INSTANTLY_BACKGROUND_VERIFY_LIMIT || 1000);
+  const limit = Number.isFinite(requestedLimit)
+    ? Math.max(1, Math.min(requestedLimit, 5000))
+    : 1000;
+  const filter = buildPendingVerificationFilter(input.channel);
+
+  const rows = await InstantlyLeadModel.find(filter)
+    .sort({ createdAt: 1 })
+    .limit(limit);
+
+  let verified = 0;
+  let rejected = 0;
+  let failed = 0;
+  const results: any[] = [];
+  const cache: Record<string, ExportVerificationCacheValue> = {};
+
+  for (const row of rows as any[]) {
+    const email = cleanEmail(row.email);
+
+    if (!email) continue;
+
+    try {
+      const cached = cache[email];
+      const verifyResult = cached
+        ? { status: cached.status, raw: cached.raw }
+        : await verifyEmailWithMillionVerifier(email);
+      const status = normalizeVerificationStatusForStorage(verifyResult.status);
+      const contactStatus = isVerificationAccepted(status)
+        ? "verified"
+        : isVerificationRejected(status)
+          ? "invalid"
+          : "verification_pending";
+
+      cache[email] = { status, raw: verifyResult.raw };
+
+      await InstantlyLeadModel.updateMany(
+        { email },
+        {
+          $set: {
+            verificationStatus: status,
+            "raw.millionVerifier": verifyResult.raw
+          }
+        }
+      );
+
+      await ContactModel.updateMany(
+        { email },
+        {
+          $set: {
+            verificationStatus: status,
+            status: contactStatus,
+            "raw.millionVerifier": verifyResult.raw,
+            verifiedAt: new Date()
+          }
+        }
+      );
+
+      verified += 1;
+      if (isVerificationRejected(status)) rejected += 1;
+
+      results.push({ email, status });
+      await new Promise((resolve) => setTimeout(resolve, 120));
+    } catch (error: any) {
+      failed += 1;
+      results.push({
+        email,
+        status: "Pending Verification",
+        error: error?.message || String(error)
+      });
+    }
+  }
+
+  return {
+    scanned: rows.length,
+    verified,
+    rejected,
+    failed,
+    remaining: Math.max(0, await InstantlyLeadModel.countDocuments(filter)),
+    data: results
+  };
+}
+
+async function fillMissingCompetitorsInternal(input: { channel?: string } = {}) {
+  const filter: Record<string, any> = missingCompetitorQuery();
+
+  if (input.channel) filter.channel = input.channel;
+
+  const rows: any[] = await InstantlyLeadModel.find(filter)
+    .select("companyName")
+    .sort({ companyName: 1 })
+    .lean();
+
+  const companies: string[] = Array.from(
+    new Set(
+      rows
+        .map((row: any) => cleanText(row.companyName))
+        .filter((companyName: string) => companyName.length > 0)
+    )
+  );
+
+  return fillCompetitorsForCompanies(companies);
+}
+
+async function pullBouncedFromInstantlyInternal(mode: "all" | "crm" = "all") {
+  const campaignIds = await getCampaignIdsForBounceMode(mode);
+
+  if (campaignIds.length === 0) {
+    return {
+      mode,
+      campaignsScanned: 0,
+      uniqueBouncedEmails: 0,
+      totalUpdated: 0,
+      message: "No campaigns found for selected mode"
+    };
+  }
+
+  const bouncedEmails: Record<string, boolean> = {};
+
+  for (const campaignIdRaw of campaignIds) {
+    const campaignId = String(campaignIdRaw);
+    let cursor = "";
+
+    while (true) {
+      const payload: Record<string, any> = {
+        campaign: campaignId,
+        filter: "FILTER_VAL_BOUNCED",
+        limit: 100
+      };
+
+      if (cursor) {
+        payload.starting_after = cursor;
+      }
+
+      const result: any = await instantlyApiCall("POST", "/leads/list", payload);
+      const items: any[] = Array.isArray(result?.items) ? result.items : [];
+
+      for (const item of items) {
+        const email = cleanEmail(
+          item.email || item?.lead?.email || item?.data?.email
+        );
+
+        if (!email) continue;
+
+        bouncedEmails[email] = true;
+
+        await BounceEventModel.create({
+          email,
+          campaignId,
+          eventType: "bounced",
+          reason: item.status || item.reason || "FILTER_VAL_BOUNCED",
+          source: mode,
+          raw: item
+        });
+      }
+
+      if (!result?.next_starting_after) break;
+
+      cursor = String(result.next_starting_after);
+    }
+  }
+
+  const emails = Object.keys(bouncedEmails);
+  let totalUpdated = 0;
+
+  for (const email of emails) {
+    const leadResult = await InstantlyLeadModel.updateMany(
+      { email },
+      {
+        $set: {
+          instantlyBounced: "Bounced",
+          verificationStatus: "bounced",
+          "raw.instantlyBouncedAt": new Date()
+        }
+      }
+    );
+
+    await ContactModel.updateMany(
+      { email },
+      {
+        $set: {
+          status: "bounced",
+          verificationStatus: "bounced",
+          "raw.instantlyBouncedAt": new Date()
+        }
+      }
+    );
+
+    totalUpdated += leadResult.modifiedCount || 0;
+  }
+
+  return {
+    mode,
+    campaignsScanned: campaignIds.length,
+    uniqueBouncedEmails: emails.length,
+    totalUpdated
+  };
+}
+
+async function runInstantlyBackendMaintenance(input: {
+  channel?: string;
+  jobId?: string;
+  reason?: string;
+} = {}) {
+  const result: any = {
+    success: true,
+    reason: input.reason || "background",
+    bounced: null,
+    verification: null,
+    competitors: null,
+    errors: [] as any[]
+  };
+
+  if (envBool(process.env.INSTANTLY_BACKGROUND_PULL_BOUNCED, true)) {
+    try {
+      updateExportJobProgress(input.jobId, {}, "Refreshing Instantly bounced statuses...");
+      result.bounced = await pullBouncedFromInstantlyInternal("all");
+      updateExportJobProgress(input.jobId, {
+        bouncedCampaignsScanned: result.bounced.campaignsScanned || 0,
+        bouncedRowsUpdated: result.bounced.totalUpdated || 0
+      });
+    } catch (error: any) {
+      console.error("Background bounced sync failed:", error?.message || error);
+      result.errors.push({ step: "bounced", message: error?.message || String(error) });
+    }
+  }
+
+  if (envBool(process.env.INSTANTLY_BACKGROUND_VERIFY_PENDING, true)) {
+    try {
+      updateExportJobProgress(input.jobId, {}, "Verifying pending Instantly leads...");
+      result.verification = await verifyPendingInstantlyLeadsInternal({
+        channel: input.channel,
+        limit: Number(process.env.INSTANTLY_BACKGROUND_VERIFY_LIMIT || 1000)
+      });
+      updateExportJobProgress(input.jobId, {
+        pendingVerified: result.verification.verified || 0,
+        pendingRejected: result.verification.rejected || 0,
+        pendingVerificationFailed: result.verification.failed || 0
+      });
+    } catch (error: any) {
+      console.error("Background verification failed:", error?.message || error);
+      result.errors.push({ step: "verification", message: error?.message || String(error) });
+    }
+  }
+
+  if (envBool(process.env.INSTANTLY_BACKGROUND_FILL_COMPETITORS, true)) {
+    try {
+      updateExportJobProgress(input.jobId, {}, "Filling competitor columns...");
+      result.competitors = await fillMissingCompetitorsInternal({ channel: input.channel });
+      updateExportJobProgress(input.jobId, {
+        competitorsCompanies: result.competitors.companies || 0,
+        competitorsUpdated: result.competitors.updated || 0
+      });
+    } catch (error: any) {
+      console.error("Background competitor fill failed:", error?.message || error);
+      result.errors.push({ step: "competitors", message: error?.message || String(error) });
+    }
+  }
+
+  return result;
+}
+
+let instantlyMaintenanceRunning = false;
+let instantlyMaintenancePending: null | { channel?: string; reason?: string } = null;
+let instantlyMaintenanceLastStartedAt = 0;
+
+function scheduleInstantlyBackendMaintenance(input: {
+  channel?: string;
+  reason?: string;
+  force?: boolean;
+} = {}) {
+  if (!envBool(process.env.INSTANTLY_BACKGROUND_MAINTENANCE_ENABLED, true)) return;
+
+  if (instantlyMaintenanceRunning) {
+    instantlyMaintenancePending = { channel: input.channel, reason: input.reason || "queued" };
+    return;
+  }
+
+  const debounceMs = Number(process.env.INSTANTLY_BACKGROUND_MAINTENANCE_DEBOUNCE_MS || 2 * 60 * 1000);
+
+  if (!input.force && Date.now() - instantlyMaintenanceLastStartedAt < debounceMs) {
+    return;
+  }
+
+  instantlyMaintenanceRunning = true;
+  instantlyMaintenanceLastStartedAt = Date.now();
+
+  setImmediate(async () => {
+    try {
+      await runInstantlyBackendMaintenance({
+        channel: input.channel,
+        reason: input.reason || "scheduled"
+      });
+    } catch (error: any) {
+      console.error("Scheduled Instantly backend maintenance failed:", error?.message || error);
+    } finally {
+      instantlyMaintenanceRunning = false;
+
+      if (instantlyMaintenancePending) {
+        const next = instantlyMaintenancePending;
+        instantlyMaintenancePending = null;
+        scheduleInstantlyBackendMaintenance({ ...next, force: true });
+      }
+    }
+  });
+}
+
 async function runInstantlyExportNow(input: { brandName?: string; jobId?: string } = {}) {
   const brandNameFilter = cleanText(input.brandName);
-  const jobId = input.jobId;
-
-  updateInstantlyExportJob(jobId, {
-    message: "Loading brands and contacts for export...",
-    progress: { step: "loading" }
-  });
 
   const brandMaps = await BrandMapModel.find(
     brandNameFilter ? { brandName: brandNameFilter } : {}
-  )
-    .sort({ createdAt: -1 })
-    .lean();
+  ).sort({ createdAt: -1 });
+
+  updateExportJobProgress(
+    input.jobId,
+    {
+      totalBrands: brandMaps.length,
+      processedBrands: 0,
+      processedContacts: 0,
+      newRows: 0,
+      updatedExistingUnpushed: 0,
+      skippedAlreadyPushed: 0,
+      verifiedContacts: 0,
+      skippedInvalidVerification: 0,
+      competitorsCompanies: 0,
+      competitorsUpdated: 0
+    },
+    "Exporting leads..."
+  );
 
   let exported = 0;
   let skippedAlreadyExported = 0;
   let updatedExistingUnpushed = 0;
   let contactsNormalized = 0;
   let processedContacts = 0;
+  let verifiedContacts = 0;
+  let skippedInvalidVerification = 0;
   const companiesForCompetitors = new Set<string>();
   const processedChannelEmails = new Set<string>();
+  const verificationCache: Record<string, ExportVerificationCacheValue> = {};
+  const verifyOnExport = shouldVerifyOnExport();
+  const maxExportVerifications = exportVerificationLimit();
 
-  updateInstantlyExportJob(jobId, {
-    message: `Found ${brandMaps.length} brand(s). Preparing Instantly rows...`,
-    progress: {
-      step: "processing-brands",
-      totalBrands: brandMaps.length,
-      processedBrands: 0,
-      processedContacts,
-      exported,
-      updatedExistingUnpushed,
-      skippedAlreadyExported,
-      contactsNormalized
-    }
-  });
-
-  for (let brandIndex = 0; brandIndex < (brandMaps as any[]).length; brandIndex += 1) {
-    const brandMap = (brandMaps as any[])[brandIndex];
+  for (let brandIndex = 0; brandIndex < brandMaps.length; brandIndex += 1) {
+    const brandMap = brandMaps[brandIndex] as any;
     const brandName = cleanText(brandMap.brandName);
     const domain = cleanText(brandMap.domain);
 
     if (!brandName || !domain) {
-      updateInstantlyExportJob(jobId, {
-        progress: { processedBrands: brandIndex + 1 }
-      });
+      updateExportJobProgress(
+        input.jobId,
+        { processedBrands: brandIndex + 1 },
+        `Skipping incomplete brand ${brandIndex + 1}/${brandMaps.length}...`
+      );
       continue;
     }
 
-    updateInstantlyExportJob(jobId, {
-      message: `Exporting ${brandIndex + 1}/${brandMaps.length}: ${brandName}`,
-      progress: {
-        step: "processing-brands",
-        totalBrands: brandMaps.length,
-        processedBrands: brandIndex,
-        currentBrand: brandName,
-        processedContacts,
-        exported,
-        updatedExistingUnpushed,
-        skippedAlreadyExported,
-        contactsNormalized
-      }
-    });
+    updateExportJobProgress(
+      input.jobId,
+      { processedBrands: brandIndex, processedContacts },
+      `Exporting ${brandName} (${brandIndex + 1}/${brandMaps.length})...`
+    );
 
     const contacts = await ContactModel.find({
       brandName,
       domain,
       email: { $exists: true, $nin: ["", null] },
       status: { $nin: ["invalid", "bounced", "skipped"] },
-      verificationStatus: { $nin: ["invalid", "bounced"] }
-    })
-      .sort({ createdAt: 1 })
-      .lean();
+      verificationStatus: { $nin: ["Invalid", "invalid", "bounced", "Disposable", "disposable"] }
+    }).sort({ createdAt: 1 });
 
     const productName = getProductNameFromBrandMap(brandMap);
-    const contactUpdateOps: any[] = [];
-    const leadsByChannel: Record<string, any[]> = {
-      "Enoylity Technology": [],
-      "MHD Tech": []
-    };
 
     for (const originalContact of contacts as any[]) {
       const email = cleanEmail(originalContact.email);
 
       if (!email) continue;
 
-      const currentName = cleanText(originalContact.fullName);
-      const currentRole = cleanText(originalContact.designation || originalContact.role);
-      const inferredName = currentName || inferFullNameFromEmail(email, brandName);
-      const inferredRole = currentRole || inferRoleFromEmail(email);
-      const contactPatch: Record<string, any> = {};
+      processedContacts += 1;
 
-      if (!currentName && inferredName) {
-        contactPatch.fullName = inferredName;
-        contactPatch.firstName = inferredName.split(/\s+/)[0];
-      }
+      const contact = await normalizeContactBeforeExport(
+        originalContact,
+        brandName
+      );
 
-      if (!currentRole && inferredRole) {
-        contactPatch.designation = inferredRole;
-        contactPatch.role = inferredRole;
-      }
-
-      const contact = {
-        ...originalContact,
-        ...contactPatch
-      };
-
-      if (Object.keys(contactPatch).length > 0) {
+      if (
+        !cleanText(originalContact.fullName) ||
+        !cleanText(originalContact.designation || originalContact.role)
+      ) {
         contactsNormalized += 1;
-        contactUpdateOps.push({
-          updateOne: {
-            filter: { _id: originalContact._id },
-            update: { $set: contactPatch }
-          }
-        });
+      }
+
+      const verificationStatus = await resolveVerificationForExport({
+        contact,
+        email,
+        cache: verificationCache,
+        verifyOnExport,
+        canVerifyMore: () => verifiedContacts < maxExportVerifications,
+        onVerified: () => {
+          verifiedContacts += 1;
+        }
+      });
+
+      if (isVerificationRejected(verificationStatus)) {
+        skippedInvalidVerification += 1;
+        continue;
       }
 
       const firstName = getBetterFirstName(contact, brandName);
@@ -1638,7 +2174,7 @@ async function runInstantlyExportNow(input: { brandName?: string; jobId?: string
 
         const cfg = getChannelConfig(channel);
 
-        leadsByChannel[channel].push({
+        const upsertResult = await safeUpsertInstantlyLead({
           channel,
           firstName,
           email,
@@ -1648,12 +2184,7 @@ async function runInstantlyExportNow(input: { brandName?: string; jobId?: string
           competitor1: "",
           competitor2: "",
           pushedStatus: "",
-          verificationStatus:
-            contact.status === "verified" ||
-            contact.verificationStatus === "valid" ||
-            contact.verificationStatus === "Ok"
-              ? "Ok"
-              : "Pending Verification",
+          verificationStatus,
           instantlyBounced: "",
           gatewayBounced: "Not Checked",
           brandMapId: brandMap._id,
@@ -1663,116 +2194,114 @@ async function runInstantlyExportNow(input: { brandName?: string; jobId?: string
             oldGasEquivalent: "exportToInstantly"
           }
         });
-      }
-    }
 
-    if (contactUpdateOps.length > 0) {
-      await ContactModel.bulkWrite(contactUpdateOps, { ordered: false });
-    }
-
-    for (const channel of ["Enoylity Technology", "MHD Tech"] as const) {
-      const channelLeads = leadsByChannel[channel];
-
-      if (channelLeads.length === 0) continue;
-
-      const emails = channelLeads.map((lead) => lead.email);
-      const existingLeads = await InstantlyLeadModel.find({
-        channel,
-        email: { $in: emails }
-      })
-        .select("email pushedStatus")
-        .lean();
-
-      const existingByEmail = new Map<string, any>();
-
-      for (const existingLead of existingLeads as any[]) {
-        existingByEmail.set(cleanEmail(existingLead.email), existingLead);
-      }
-
-      const leadWriteOps: any[] = [];
-
-      for (const lead of channelLeads) {
-        const existingLead = existingByEmail.get(lead.email);
-
-        if (existingLead && cleanText(existingLead.pushedStatus)) {
+        if (upsertResult.skipped) {
           skippedAlreadyExported += 1;
           continue;
         }
 
-        leadWriteOps.push({
-          updateOne: {
-            filter: { channel, email: lead.email },
-            update: { $set: lead },
-            upsert: true
-          }
-        });
+        if (upsertResult.created) exported += 1;
+        if (upsertResult.updated) updatedExistingUnpushed += 1;
+
+        companiesForCompetitors.add(brandName);
       }
 
-      if (leadWriteOps.length > 0) {
-        const result = await InstantlyLeadModel.bulkWrite(leadWriteOps, {
-          ordered: false
+      if (processedContacts % 25 === 0) {
+        updateExportJobProgress(input.jobId, {
+          processedContacts,
+          newRows: exported,
+          updatedExistingUnpushed,
+          skippedAlreadyPushed: skippedAlreadyExported,
+          verifiedContacts,
+          skippedInvalidVerification
         });
-
-        exported += result.upsertedCount || 0;
-        updatedExistingUnpushed += result.matchedCount || 0;
-        companiesForCompetitors.add(brandName);
       }
     }
 
-    processedContacts += (contacts as any[]).length;
-
-    updateInstantlyExportJob(jobId, {
-      message: `Exporting ${brandIndex + 1}/${brandMaps.length}: ${brandName}`,
-      progress: {
-        step: "processing-brands",
-        totalBrands: brandMaps.length,
-        processedBrands: brandIndex + 1,
-        currentBrand: brandName,
-        processedContacts,
-        exported,
-        updatedExistingUnpushed,
-        skippedAlreadyExported,
-        contactsNormalized
-      }
+    updateExportJobProgress(input.jobId, {
+      processedBrands: brandIndex + 1,
+      processedContacts,
+      newRows: exported,
+      updatedExistingUnpushed,
+      skippedAlreadyPushed: skippedAlreadyExported,
+      verifiedContacts,
+      skippedInvalidVerification
     });
   }
 
-  const shouldFillCompetitorsDuringExport = envBool(
-    process.env.INSTANTLY_EXPORT_FILL_COMPETITORS,
-    false
+  updateExportJobProgress(
+    input.jobId,
+    {
+      processedContacts,
+      newRows: exported,
+      updatedExistingUnpushed,
+      skippedAlreadyPushed: skippedAlreadyExported,
+      verifiedContacts,
+      skippedInvalidVerification
+    },
+    "Running backend lead checks..."
   );
 
-  let competitorFill = {
+  const maintenance = await runInstantlyBackendMaintenance({
+    jobId: input.jobId,
+    reason: "export"
+  });
+  const competitorFill = maintenance.competitors || {
     companies: companiesForCompetitors.size,
     updated: 0,
-    data: [] as any[]
+    failed: 0,
+    stillEmpty: 0
   };
-
-  if (shouldFillCompetitorsDuringExport && companiesForCompetitors.size > 0) {
-    updateInstantlyExportJob(jobId, {
-      message: "Filling competitors for exported leads...",
-      progress: { step: "filling-competitors" }
-    });
-
-    competitorFill = await fillCompetitorsForCompanies(
-      Array.from(companiesForCompetitors)
-    );
-  }
+  const pendingVerification = maintenance.verification || {
+    scanned: 0,
+    verified: 0,
+    rejected: 0,
+    failed: 0,
+    remaining: 0
+  };
+  const bouncedSync = maintenance.bounced || {
+    campaignsScanned: 0,
+    uniqueBouncedEmails: 0,
+    totalUpdated: 0
+  };
 
   return {
     success: true,
     exported,
+    exportedRows: exported,
     competitorsCompanies: competitorFill.companies,
     competitorsUpdated: competitorFill.updated,
-    competitorsQueued: shouldFillCompetitorsDuringExport ? 0 : companiesForCompetitors.size,
+    competitorsFailed: competitorFill.failed,
+    competitorsStillEmpty: competitorFill.stillEmpty,
+    pendingVerificationScanned: pendingVerification.scanned,
+    pendingVerified: pendingVerification.verified,
+    pendingRejected: pendingVerification.rejected,
+    pendingVerificationFailed: pendingVerification.failed,
+    pendingVerificationRemaining: pendingVerification.remaining,
+    bouncedCampaignsScanned: bouncedSync.campaignsScanned,
+    bouncedEmailsFound: bouncedSync.uniqueBouncedEmails,
+    bouncedRowsUpdated: bouncedSync.totalUpdated,
+    backendMaintenanceErrors: maintenance.errors,
     skippedAlreadyExported,
+    skippedPushedLeads: skippedAlreadyExported,
     updatedExistingUnpushed,
-    contactsNormalized
+    contactsNormalized,
+    contactsFixed: contactsNormalized,
+    processedContacts,
+    verifiedContacts: verifiedContacts + (pendingVerification.verified || 0),
+    skippedInvalidVerification: skippedInvalidVerification + (pendingVerification.rejected || 0),
+    verifyOnExport,
+    maxExportVerifications
   };
 }
 
+
 export async function exportInstantlyLeads(req: Request, res: Response) {
-  const existingRunningJob = getRunningInstantlyExportJobEntry();
+  markTimedOutExportJobs();
+
+  const existingRunningJob = Object.entries(instantlyExportJobs).find(
+    ([, job]) => job.status === "running"
+  );
 
   if (existingRunningJob) {
     const [jobId, job] = existingRunningJob;
@@ -1782,25 +2311,22 @@ export async function exportInstantlyLeads(req: Request, res: Response) {
       jobId,
       status: job.status,
       message: job.message || "Export is already running.",
-      startedAt: job.startedAt,
-      progress: job.progress
+      progress: job.progress || {}
     });
   }
 
   const jobId = `export_${Date.now()}`;
-  const brandName = cleanText(req.body?.brandName);
 
   instantlyExportJobs[jobId] = {
     status: "running",
     message: "Export started...",
-    startedAt: new Date().toISOString(),
-    progress: { step: "queued" }
+    startedAt: new Date().toISOString()
   };
 
   setImmediate(async () => {
     try {
       const result = await runInstantlyExportNow({
-        brandName,
+        brandName: cleanText(req.body?.brandName),
         jobId
       });
 
@@ -1809,11 +2335,7 @@ export async function exportInstantlyLeads(req: Request, res: Response) {
         status: "completed",
         message: "Export complete.",
         finishedAt: new Date().toISOString(),
-        result,
-        progress: {
-          ...(instantlyExportJobs[jobId].progress || {}),
-          step: "completed"
-        }
+        result
       };
     } catch (error: any) {
       instantlyExportJobs[jobId] = {
@@ -1821,11 +2343,7 @@ export async function exportInstantlyLeads(req: Request, res: Response) {
         status: "failed",
         message: error.message || "Export failed.",
         finishedAt: new Date().toISOString(),
-        error: error.message || String(error),
-        progress: {
-          ...(instantlyExportJobs[jobId].progress || {}),
-          step: "failed"
-        }
+        error: error.message || String(error)
       };
 
       console.error("[Instantly Export Job Failed]", error);
@@ -1837,28 +2355,27 @@ export async function exportInstantlyLeads(req: Request, res: Response) {
     jobId,
     status: "running",
     message: "Export started in background.",
-    startedAt: instantlyExportJobs[jobId].startedAt,
-    progress: instantlyExportJobs[jobId].progress
+    progress: instantlyExportJobs[jobId].progress || {}
   });
 }
 
 export async function getInstantlyExportStatus(req: Request, res: Response) {
+  markTimedOutExportJobs();
+
   const jobId = String(req.params.jobId || "");
   const job = instantlyExportJobs[jobId];
 
   if (!job) {
     return res.status(404).json({
       success: false,
-      message: "Export job not found. If the backend was restarted, please start Export Leads again."
+      message: "Export job not found."
     });
   }
-
-  const currentJob = markInstantlyExportJobStaleIfNeeded(jobId, job);
 
   return res.json({
     success: true,
     jobId,
-    ...currentJob
+    ...job
   });
 }
 
@@ -1945,6 +2462,11 @@ export async function getImportedLeads(req: Request, res: Response) {
     const rows = await InstantlyLeadModel.find({ channel })
       .sort({ createdAt: -1 })
       .limit(limit);
+
+    scheduleInstantlyBackendMaintenance({
+      channel,
+      reason: "imported-leads-read"
+    });
 
     const data = rows.map((row: any) => {
       const lead = row.toObject ? row.toObject() : row;
@@ -2045,80 +2567,60 @@ export async function getTemplatePreview(req: Request, res: Response) {
   }
 }
 
-export async function fillCompetitors(req: Request, res: Response) {
+export async function verifyPendingInstantlyLeads(req: Request, res: Response) {
   try {
-    const companyFilter = cleanText(req.body?.companyName);
+    const channel = cleanText(req.body?.channel || req.query.channel);
+    const requestedLimit = Number(req.body?.limit || req.query.limit || 500);
+    const limit = Number.isFinite(requestedLimit)
+      ? Math.max(1, Math.min(requestedLimit, 1000))
+      : 500;
 
-    const filter: Record<string, any> = {
-      companyName: { $exists: true, $nin: ["", null] },
-      $or: [
-        { competitor1: { $exists: false } },
-        { competitor1: "" },
-        { competitor1: null },
-        { competitor1: "-" }
-      ]
-    };
-
-    if (companyFilter) {
-      filter.companyName = companyFilter;
-    }
-
-    const rows: any[] = await InstantlyLeadModel.find(filter).sort({
-      companyName: 1
-    });
-
-    const companies: string[] = Array.from(
-      new Set(
-        rows
-          .map((row: any) => cleanText(row.companyName))
-          .filter((companyName: string) => companyName.length > 0)
-      )
-    );
-
-    let updated = 0;
-    const results: any[] = [];
-
-    for (const companyName of companies) {
-      const competitors = await askOpenAIForCompetitors(companyName);
-
-      const result = await InstantlyLeadModel.updateMany(
-        {
-          companyName,
-          $or: [
-            { competitor1: { $exists: false } },
-            { competitor1: "" },
-            { competitor1: null },
-            { competitor1: "-" }
-          ]
-        },
-        {
-          $set: {
-            competitor1: competitors.competitor1,
-            competitor2: competitors.competitor2
-          }
-        }
-      );
-
-      updated += result.modifiedCount || 0;
-
-      results.push({
-        companyName,
-        competitor1: competitors.competitor1,
-        competitor2: competitors.competitor2,
-        updated: result.modifiedCount || 0
-      });
-    }
+    const result = await verifyPendingInstantlyLeadsInternal({ channel, limit });
 
     res.json({
       success: true,
-      companies: companies.length,
-      updated,
-      data: results
+      ...result
     });
   } catch (error: any) {
     res.status(500).json({
       success: false,
-      message: error.message
+      message: error.message || "Failed to verify pending leads"
+    });
+  }
+}
+
+export async function fillCompetitors(req: Request, res: Response) {
+  try {
+    const companyFilter = cleanText(req.body?.companyName || req.query.companyName);
+    const channel = cleanText(req.body?.channel || req.query.channel);
+
+    if (companyFilter) {
+      const result = await fillCompetitorsForCompanies([companyFilter]);
+
+      return res.json({
+        success: true,
+        companies: result.companies,
+        updated: result.updated,
+        failed: result.failed,
+        stillEmpty: result.stillEmpty,
+        data: result.data
+      });
+    }
+
+    const result = await fillMissingCompetitorsInternal({ channel });
+
+    res.json({
+      success: true,
+      companies: result.companies,
+      updated: result.updated,
+      failed: result.failed,
+      stillEmpty: result.stillEmpty,
+      data: result.data
+    });
+  } catch (error: any) {
+    res.status(500).json({
+      success: false,
+      message: error.message || "Failed to fill competitors"
     });
   }
 }
@@ -2367,97 +2869,11 @@ async function getCampaignIdsForBounceMode(mode: string): Promise<string[]> {
 export async function pullBouncedFromInstantly(req: Request, res: Response) {
   try {
     const mode = req.body?.mode === "crm" ? "crm" : "all";
-    const campaignIds = await getCampaignIdsForBounceMode(mode);
-
-    if (campaignIds.length === 0) {
-      return res.json({
-        success: true,
-        mode,
-        campaignsScanned: 0,
-        uniqueBouncedEmails: 0,
-        totalUpdated: 0,
-        message: "No campaigns found for selected mode"
-      });
-    }
-
-    const bouncedEmails: Record<string, boolean> = {};
-
-    for (const campaignIdRaw of campaignIds) {
-      const campaignId = String(campaignIdRaw);
-      let cursor = "";
-
-      while (true) {
-        const payload: Record<string, any> = {
-          campaign: campaignId,
-          filter: "FILTER_VAL_BOUNCED",
-          limit: 100
-        };
-
-        if (cursor) {
-          payload.starting_after = cursor;
-        }
-
-        const result: any = await instantlyApiCall("POST", "/leads/list", payload);
-        const items: any[] = Array.isArray(result?.items) ? result.items : [];
-
-        for (const item of items) {
-          const email = cleanEmail(
-            item.email || item?.lead?.email || item?.data?.email
-          );
-
-          if (!email) continue;
-
-          bouncedEmails[email] = true;
-
-          await BounceEventModel.create({
-            email,
-            campaignId,
-            eventType: "bounced",
-            reason: item.status || item.reason || "FILTER_VAL_BOUNCED",
-            source: mode,
-            raw: item
-          });
-        }
-
-        if (!result?.next_starting_after) break;
-
-        cursor = String(result.next_starting_after);
-      }
-    }
-
-    const emails = Object.keys(bouncedEmails);
-    let totalUpdated = 0;
-
-    for (const email of emails) {
-      const leadResult = await InstantlyLeadModel.updateMany(
-        { email },
-        {
-          $set: {
-            instantlyBounced: "Bounced"
-          }
-        }
-      );
-
-      await ContactModel.updateMany(
-        { email },
-        {
-          $set: {
-            status: "bounced",
-            verificationStatus: "bounced",
-            bouncedAt: new Date()
-          }
-        }
-      );
-
-      totalUpdated += leadResult.modifiedCount || 0;
-    }
+    const result = await pullBouncedFromInstantlyInternal(mode);
 
     res.json({
       success: true,
-      mode,
-      campaignsScanned: campaignIds.length,
-      uniqueBouncedEmails: emails.length,
-      totalUpdated
+      ...result
     });
   } catch (error: any) {
     res.status(500).json({

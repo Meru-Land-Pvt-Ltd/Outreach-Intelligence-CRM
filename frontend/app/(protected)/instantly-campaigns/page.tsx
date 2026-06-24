@@ -3,11 +3,8 @@
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import {
   CalendarDays,
-  CheckCircle2,
   ChevronDown,
   Eye,
-  Info,
-  Sparkles,
   Send,
   UploadCloud,
   Users,
@@ -69,19 +66,12 @@ type ExportResult = {
   skippedPushedLeads?: number;
   contactsNormalized?: number;
   contactsFixed?: number;
-  competitorsQueued?: number;
-};
-
-type ExportProgress = {
-  step?: string;
-  totalBrands?: number;
-  processedBrands?: number;
-  currentBrand?: string;
-  processedContacts?: number;
-  exported?: number;
-  updatedExistingUnpushed?: number;
-  skippedAlreadyExported?: number;
-  contactsNormalized?: number;
+  verifiedContacts?: number;
+  skippedInvalidVerification?: number;
+  competitorsUpdated?: number;
+  pendingVerified?: number;
+  pendingRejected?: number;
+  bouncedRowsUpdated?: number;
 };
 
 type ExportStatusResponse = {
@@ -91,7 +81,21 @@ type ExportStatusResponse = {
   message?: string;
   error?: string;
   result?: ExportResult;
-  progress?: ExportProgress;
+  progress?: {
+    totalBrands?: number;
+    processedBrands?: number;
+    processedContacts?: number;
+    newRows?: number;
+    updatedExistingUnpushed?: number;
+    skippedAlreadyPushed?: number;
+    verifiedContacts?: number;
+    skippedInvalidVerification?: number;
+    competitorsCompanies?: number;
+    competitorsUpdated?: number;
+    pendingVerified?: number;
+    pendingRejected?: number;
+    bouncedRowsUpdated?: number;
+  };
 };
 
 const CHANNELS: Channel[] = ["Enoylity Technology", "MHD Tech"];
@@ -214,52 +218,50 @@ function buildExportSuccessMessage(result: ExportResult | undefined) {
     "contactsNormalized",
     "contactsFixed",
   ]);
-  const competitorsQueued = getExportNumber(result, ["competitorsQueued"]);
+  const verifiedContacts = getExportNumber(result, ["verifiedContacts"]);
+  const skippedInvalid = getExportNumber(result, ["skippedInvalidVerification"]);
+  const competitorsUpdated = getExportNumber(result, ["competitorsUpdated"]);
+  const pendingVerified = getExportNumber(result, ["pendingVerified"]);
+  const bouncedRowsUpdated = getExportNumber(result, ["bouncedRowsUpdated"]);
 
   return (
-    "Export complete. New rows: " +
+    "Export complete. Backend checks also ran automatically. New rows: " +
     newRows +
     ", updated existing unpushed: " +
     updatedExistingUnpushed +
+    ", verified during export: " +
+    verifiedContacts +
+    ", pending verified: " +
+    pendingVerified +
+    ", skipped invalid: " +
+    skippedInvalid +
+    ", competitor rows updated: " +
+    competitorsUpdated +
+    ", bounced rows updated: " +
+    bouncedRowsUpdated +
     ", skipped already pushed: " +
     skippedAlreadyPushed +
     ", contacts fixed: " +
-    contactsFixed +
-    (competitorsQueued > 0
-      ? ", competitors queued: " + competitorsQueued
-      : "")
+    contactsFixed
   );
 }
 
-function buildExportRunningMessage(statusResponse: ExportStatusResponse) {
+function buildExportProgressMessage(statusResponse: ExportStatusResponse) {
   const progress = statusResponse.progress || {};
-  const base = statusResponse.message || "Export is running in background...";
+  const processedBrands = Number(progress.processedBrands || 0);
+  const totalBrands = Number(progress.totalBrands || 0);
+  const processedContacts = Number(progress.processedContacts || 0);
+  const newRows = Number(progress.newRows || 0);
+  const updatedRows = Number(progress.updatedExistingUnpushed || 0);
+  const verified = Number(progress.verifiedContacts || 0);
+  const competitorRows = Number(progress.competitorsUpdated || 0);
+  const bouncedRows = Number(progress.bouncedRowsUpdated || 0);
 
-  if (progress.totalBrands && progress.totalBrands > 0) {
-    const processedBrands = Number(progress.processedBrands || 0);
-    const processedContacts = Number(progress.processedContacts || 0);
-    const exported = Number(progress.exported || 0);
-    const updated = Number(progress.updatedExistingUnpushed || 0);
-    const skipped = Number(progress.skippedAlreadyExported || 0);
+  const brandPart = totalBrands
+    ? `Brands ${processedBrands}/${totalBrands}`
+    : "Preparing brands";
 
-    return (
-      base +
-      " Brands " +
-      processedBrands +
-      "/" +
-      progress.totalBrands +
-      ", contacts scanned: " +
-      processedContacts +
-      ", new rows: " +
-      exported +
-      ", updated: " +
-      updated +
-      ", skipped: " +
-      skipped
-    );
-  }
-
-  return base;
+  return `${statusResponse.message || "Export is running..."} ${brandPart}, contacts scanned ${processedContacts}, verified ${verified}, new rows ${newRows}, updated ${updatedRows}, competitors updated ${competitorRows}, bounced updated ${bouncedRows}.`;
 }
 
 function FieldLabel({
@@ -775,15 +777,7 @@ export default function InstantlyControlPanelPage() {
     );
   }, [batchForm.dailyLimit, batchForm.selectedSenders.length]);
 
-    const competitorsReady = useMemo(() => {
-    return importedLeads.some(
-      (lead) => clean(lead.competitor1) || clean(lead.competitor2)
-    );
-  }, [importedLeads]);
 
-  const fillCompetitorsDisabled =
-    busy || importedLeads.length === 0;
-    
   async function loadSenders(channel: Channel) {
     try {
       const response = await apiGet(
@@ -816,12 +810,13 @@ export default function InstantlyControlPanelPage() {
       const response = await apiGet(
         `/instantly/imported-leads?channel=${encodeURIComponent(
           channel
-        )}&limit=2000`
+        )}&limit=5`
       );
 
       const rows = response?.data || response?.leads || [];
-      setImportedLeads(rows);
-      setLeadsExported(rows.length > 0);
+      const visibleRows = Array.isArray(rows) ? rows.slice(0, 5) : [];
+      setImportedLeads(visibleRows);
+      setLeadsExported(visibleRows.length > 0);
     } catch {
       setImportedLeads([]);
       setLeadsExported(false);
@@ -905,7 +900,7 @@ export default function InstantlyControlPanelPage() {
 
       if (statusResponse.status === "running") {
         setMessageType("info");
-        setMessage(buildExportRunningMessage(statusResponse));
+        setMessage(buildExportProgressMessage(statusResponse));
         continue;
       }
 
@@ -937,7 +932,7 @@ export default function InstantlyControlPanelPage() {
 
       if (response?.jobId) {
         setMessageType("info");
-        setMessage("Export is running in background...");
+        setMessage(response?.message || "Export is running in background...");
         result = await waitForExportJob(response.jobId);
       } else if (response?.success) {
         result = response;
@@ -966,30 +961,6 @@ export default function InstantlyControlPanelPage() {
     setLoadingAction("");
   }
 
-  async function pullBounced() {
-    await runAction("Pull Bounced", async () => {
-      const response: any = await apiPost("/instantly/pull-bounced", {
-        mode: "all",
-      });
-
-      if (response?.success) {
-        await loadImportedLeads(pushForm.channel);
-
-        return {
-          success: true,
-          message:
-            "Instantly bounced statuses refreshed. Campaigns scanned: " +
-            (response.campaignsScanned || 0) +
-            ", bounced emails: " +
-            (response.uniqueBouncedEmails || 0) +
-            ", rows updated: " +
-            (response.totalUpdated || 0),
-        };
-      }
-
-      return response;
-    });
-  }
 
 
   async function pushSingle() {
@@ -1130,18 +1101,6 @@ export default function InstantlyControlPanelPage() {
               : hasPreparedLeads
                 ? "Re-export Leads"
                 : "Export Leads"}
-          </Button>
-
-          <Button
-            type="button"
-            onClick={pullBounced}
-            disabled={busy}
-            className="h-12 rounded-xl !border-emerald-200 !bg-emerald-50 !text-emerald-700 hover:!bg-emerald-100 hover:!text-emerald-800 disabled:cursor-not-allowed disabled:opacity-50"
-          >
-            <CheckCircle2 className="mr-2 h-4 w-4" />
-            {loadingAction === "Pull Bounced"
-              ? "Refreshing..."
-              : "Pull Bounced Status"}
           </Button>
         </div>
 
