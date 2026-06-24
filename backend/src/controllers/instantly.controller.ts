@@ -929,7 +929,7 @@ function buildCampaignPayload(input: {
         steps: [
           {
             type: "email",
-            delay: 0,
+            delay: Number(process.env.DEFAULT_FOLLOWUP_1_DAYS || 2),
             delay_unit: "days",
             variants: [
               {
@@ -940,7 +940,7 @@ function buildCampaignPayload(input: {
           },
           {
             type: "email",
-            delay: Number(process.env.DEFAULT_FOLLOWUP_1_DAYS || 2),
+            delay: Number(process.env.DEFAULT_FOLLOWUP_2_DAYS || 5),
             delay_unit: "days",
             variants: [
               {
@@ -951,7 +951,6 @@ function buildCampaignPayload(input: {
           },
           {
             type: "email",
-            delay: Number(process.env.DEFAULT_FOLLOWUP_2_DAYS || 5),
             delay_unit: "days",
             variants: [
               {
