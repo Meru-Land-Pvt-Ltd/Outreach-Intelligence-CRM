@@ -951,6 +951,7 @@ function buildCampaignPayload(input: {
           },
           {
             type: "email",
+            delay: Number(process.env.DEFAULT_FOLLOWUP_3_DAYS || 0),
             delay_unit: "days",
             variants: [
               {
