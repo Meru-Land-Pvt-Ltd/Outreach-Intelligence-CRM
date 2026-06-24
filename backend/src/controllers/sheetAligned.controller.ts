@@ -9,6 +9,7 @@ import { RunLog } from "../models/RunLog.model";
 import { InstantlyLead } from "../models/InstantlyLead.model";
 import { InstantlyTemplate } from "../models/InstantlyTemplate.model";
 import { PushLog } from "../models/PushLog.model";
+import { scheduleInstantlyBackendMaintenance } from "./instantly.controller";
 
 const EmailDiscoveryModel = EmailDiscovery as any;
 const HunterRawContactModel = HunterRawContact as any;
@@ -112,11 +113,33 @@ function getInstantlyBouncedStatusForResponse(lead: any) {
   return "Not bounced";
 }
 
+function isInstantlyBouncedValue(value: any) {
+  const lower = cleanText(value).toLowerCase();
+
+  if (!lower) return false;
+
+  return lower.includes("bounce");
+}
+
+function getVerificationStatusForResponse(lead: any) {
+  const verificationStatus = cleanText(lead?.verificationStatus);
+
+  if (
+    verificationStatus.toLowerCase() === "bounced" &&
+    isInstantlyBouncedValue(getInstantlyBouncedStatusForResponse(lead))
+  ) {
+    return "Pending Verification";
+  }
+
+  return verificationStatus;
+}
+
 function normalizeInstantlyLeadForResponse(row: any) {
   const lead = row?.toObject ? row.toObject() : row;
 
   return {
     ...lead,
+    verificationStatus: getVerificationStatusForResponse(lead),
     instantlyBounced: getInstantlyBouncedStatusForResponse(lead)
   };
 }
@@ -155,6 +178,10 @@ export async function getProspeoRawContacts(req: Request, res: Response) {
 
 export async function getEnoylityInstantlyRows(req: Request, res: Response) {
   try {
+    scheduleInstantlyBackendMaintenance({
+      channel: "Enoylity Technology",
+      reason: "enoylity-instantly-read"
+    });
     const rows = await InstantlyLeadModel.find({
       channel: "Enoylity Technology"
     })
@@ -169,6 +196,10 @@ export async function getEnoylityInstantlyRows(req: Request, res: Response) {
 
 export async function getMhdInstantlyRows(req: Request, res: Response) {
   try {
+    scheduleInstantlyBackendMaintenance({
+      channel: "MHD Tech",
+      reason: "mhd-instantly-read"
+    });
     const rows = await InstantlyLeadModel.find({
       channel: "MHD Tech"
     })

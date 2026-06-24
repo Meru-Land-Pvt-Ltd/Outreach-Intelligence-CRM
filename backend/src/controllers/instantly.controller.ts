@@ -37,6 +37,7 @@ type InstantlyExportJobProgress = {
   pendingVerificationFailed?: number;
   bouncedCampaignsScanned?: number;
   bouncedRowsUpdated?: number;
+  bouncedVerificationRepaired?: number;
 };
 
 type InstantlyExportJob = {
@@ -195,6 +196,51 @@ function getInstantlyBouncedStatusForResponse(lead: any) {
   }
 
   return "Not bounced";
+}
+
+function isInstantlyBouncedValue(value: any) {
+  const lower = cleanText(value).toLowerCase();
+
+  if (!lower) return false;
+
+  return lower.includes("bounce");
+}
+
+function getVerificationStatusForResponse(lead: any) {
+  const verificationStatus = cleanText(lead?.verificationStatus);
+
+  if (
+    verificationStatus.toLowerCase() === "bounced" &&
+    isInstantlyBouncedValue(getInstantlyBouncedStatusForResponse(lead))
+  ) {
+    return "Pending Verification";
+  }
+
+  return verificationStatus;
+}
+
+function getStoredVerificationFallback(lead: any) {
+  const raw = lead?.raw || {};
+  const millionVerifier = raw?.millionVerifier || raw?.verification || {};
+
+  const candidates = [
+    millionVerifier.result,
+    millionVerifier.status,
+    millionVerifier.quality,
+    raw.verificationStatus,
+    raw.originalVerificationStatus
+  ];
+
+  for (const candidate of candidates) {
+    const value = cleanText(candidate);
+
+    if (!value) continue;
+    if (isInstantlyBouncedValue(value)) continue;
+
+    return normalizeVerificationStatusForStorage(value);
+  }
+
+  return "Pending Verification";
 }
 
 function cleanText(value: any) {
@@ -1417,7 +1463,7 @@ function missingCompetitorQuery(extra: Record<string, any> = {}) {
   return query;
 }
 
-async function fillCompetitorsForCompanies(companyNames: string[]) {
+export async function fillCompetitorsForCompanies(companyNames: string[]) {
   const uniqueCompanies = Array.from(
     new Set(
       companyNames
@@ -1647,6 +1693,7 @@ export async function getInstantlyLeads(req: Request, res: Response) {
 
       return {
         ...lead,
+        verificationStatus: getVerificationStatusForResponse(lead),
         instantlyBounced: getInstantlyBouncedStatusForResponse(lead)
       };
     });
@@ -1838,6 +1885,81 @@ async function verifyPendingInstantlyLeadsInternal(input: {
   };
 }
 
+async function repairBouncedVerificationStatusesInternal(input: { channel?: string } = {}) {
+  const filter: Record<string, any> = {
+    verificationStatus: /^bounced$/i,
+    $or: [
+      { instantlyBounced: /bounce/i },
+      { instantlyBounceStatus: /bounce/i },
+      { bouncedStatus: /bounce/i },
+      { bounceStatus: /bounce/i },
+      { "raw.instantlyBounced": /bounce/i },
+      { "raw.instantlyBounceStatus": /bounce/i },
+      { "raw.bouncedStatus": /bounce/i },
+      { "raw.bounceStatus": /bounce/i },
+      { "raw.instantlyBouncedAt": { $exists: true } }
+    ]
+  };
+
+  if (input.channel) filter.channel = input.channel;
+
+  const leads: any[] = await InstantlyLeadModel.find(filter).lean();
+  let leadsUpdated = 0;
+
+  for (const lead of leads) {
+    const verificationStatus = getStoredVerificationFallback(lead);
+
+    await InstantlyLeadModel.updateOne(
+      { _id: lead._id },
+      {
+        $set: {
+          verificationStatus,
+          "raw.verificationStatusRepairedFromBounce": true,
+          "raw.verificationStatusRepairedAt": new Date()
+        }
+      }
+    );
+
+    leadsUpdated += 1;
+  }
+
+  const contacts: any[] = await ContactModel.find({
+    verificationStatus: /^bounced$/i,
+    $or: [
+      { "raw.instantlyBouncedAt": { $exists: true } },
+      { "raw.instantlyBounced": /bounce/i }
+    ]
+  })
+    .select("_id raw")
+    .lean();
+
+  let contactsUpdated = 0;
+
+  for (const contact of contacts) {
+    const verificationStatus = getStoredVerificationFallback(contact);
+
+    await ContactModel.updateOne(
+      { _id: contact._id },
+      {
+        $set: {
+          verificationStatus,
+          "raw.verificationStatusRepairedFromInstantlyBounce": true,
+          "raw.verificationStatusRepairedAt": new Date()
+        }
+      }
+    );
+
+    contactsUpdated += 1;
+  }
+
+  return {
+    success: true,
+    leadsUpdated,
+    contactsUpdated,
+    totalUpdated: leadsUpdated + contactsUpdated
+  };
+}
+
 async function fillMissingCompetitorsInternal(input: { channel?: string } = {}) {
   const filter: Record<string, any> = missingCompetitorQuery();
 
@@ -1926,7 +2048,7 @@ async function pullBouncedFromInstantlyInternal(mode: "all" | "crm" = "all") {
       {
         $set: {
           instantlyBounced: "Bounced",
-          verificationStatus: "bounced",
+          "raw.instantlyBounced": "Bounced",
           "raw.instantlyBouncedAt": new Date()
         }
       }
@@ -1936,8 +2058,7 @@ async function pullBouncedFromInstantlyInternal(mode: "all" | "crm" = "all") {
       { email },
       {
         $set: {
-          status: "bounced",
-          verificationStatus: "bounced",
+          "raw.instantlyBounced": "Bounced",
           "raw.instantlyBouncedAt": new Date()
         }
       }
@@ -1963,6 +2084,7 @@ async function runInstantlyBackendMaintenance(input: {
     success: true,
     reason: input.reason || "background",
     bounced: null,
+    bouncedVerificationRepair: null,
     verification: null,
     competitors: null,
     errors: [] as any[]
@@ -1980,6 +2102,18 @@ async function runInstantlyBackendMaintenance(input: {
       console.error("Background bounced sync failed:", error?.message || error);
       result.errors.push({ step: "bounced", message: error?.message || String(error) });
     }
+  }
+
+  try {
+    result.bouncedVerificationRepair = await repairBouncedVerificationStatusesInternal({
+      channel: input.channel
+    });
+    updateExportJobProgress(input.jobId, {
+      bouncedVerificationRepaired: result.bouncedVerificationRepair.totalUpdated || 0
+    });
+  } catch (error: any) {
+    console.error("Bounced verification repair failed:", error?.message || error);
+    result.errors.push({ step: "bounced-verification-repair", message: error?.message || String(error) });
   }
 
   if (envBool(process.env.INSTANTLY_BACKGROUND_VERIFY_PENDING, true)) {
@@ -2021,7 +2155,7 @@ let instantlyMaintenanceRunning = false;
 let instantlyMaintenancePending: null | { channel?: string; reason?: string } = null;
 let instantlyMaintenanceLastStartedAt = 0;
 
-function scheduleInstantlyBackendMaintenance(input: {
+export function scheduleInstantlyBackendMaintenance(input: {
   channel?: string;
   reason?: string;
   force?: boolean;
@@ -2473,6 +2607,7 @@ export async function getImportedLeads(req: Request, res: Response) {
 
       return {
         ...lead,
+        verificationStatus: getVerificationStatusForResponse(lead),
         instantlyBounced: getInstantlyBouncedStatusForResponse(lead)
       };
     });
@@ -2915,7 +3050,9 @@ export async function instantlyWebhook(req: Request, res: Response) {
         { email },
         {
           $set: {
-            instantlyBounced: "Bounced"
+            instantlyBounced: "Bounced",
+            "raw.instantlyBounced": "Bounced",
+            "raw.instantlyBouncedAt": new Date()
           }
         }
       );
@@ -2924,9 +3061,8 @@ export async function instantlyWebhook(req: Request, res: Response) {
         { email },
         {
           $set: {
-            status: "bounced",
-            verificationStatus: "bounced",
-            bouncedAt: new Date()
+            "raw.instantlyBounced": "Bounced",
+            "raw.instantlyBouncedAt": new Date()
           }
         }
       );
