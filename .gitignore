@@ -20,6 +20,8 @@ worker/.env
 worker/.env.*
 frontend/.env
 frontend/.env.*
+!backend/.env.example
+!worker/.env.example
 frontend/.env.local
 
 # logs

@@ -1,6 +1,10 @@
 import { Contact } from "../models/Contact.model";
 import { BrandMap } from "../models/BrandMap.model";
 import { InstantlyLead } from "../models/InstantlyLead.model";
+import {
+  getMaxEmailsPerBrand,
+  selectBestContactsForOutreach
+} from "../utils/contactRanking";
 
 const ContactModel = Contact as any;
 const BrandMapModel = BrandMap as any;
@@ -381,7 +385,7 @@ export async function exportBrandToInstantlyTabs(brandName: string) {
     };
   }
 
-  const contacts = await ContactModel.find({
+  const allContacts = await ContactModel.find({
     brandName,
     domain,
     email: {
@@ -398,7 +402,17 @@ export async function exportBrandToInstantlyTabs(brandName: string) {
     createdAt: 1
   });
 
+  // Per-brand outreach cap: only the best MAX_EMAILS_PER_BRAND contacts are
+  // exported, ranked by verification, title relevance and seniority.
+  const contacts = selectBestContactsForOutreach(
+    allContacts as any[],
+    getMaxEmailsPerBrand()
+  );
+
   const productName = getProductNameFromBrandMap(brandMap);
+  const niche = cleanText(brandMap.niche);
+  const seedBrandNameForLead = cleanText(brandMap.seedBrandName || brandMap.foundVia);
+  const campaignSource = cleanText(brandMap.foundVia || brandMap.seedBrandName);
 
   let exported = 0;
   let updated = 0;
@@ -443,6 +457,10 @@ export async function exportBrandToInstantlyTabs(brandName: string) {
           : "Pending Verification",
         instantlyBounced: "",
         gatewayBounced: "Not Checked",
+        niche,
+        campaignSource,
+        seedBrandName: seedBrandNameForLead,
+        seedBrandId: brandMap.seedBrandId || null,
         brandMapId: brandMap._id,
         contactId: contact._id,
         raw: {

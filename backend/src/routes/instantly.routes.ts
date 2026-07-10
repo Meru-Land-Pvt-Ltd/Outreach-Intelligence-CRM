@@ -15,6 +15,7 @@ import {
   instantlyWebhook,
   pullBouncedFromInstantly,
   pushToInstantly,
+  resetOldPushedLeads,
   saveTemplate,
   verifyPendingInstantlyLeads
 } from "../controllers/instantly.controller";
@@ -30,6 +31,8 @@ router.get("/template-preview", getTemplatePreview);
 
 router.post("/export", exportInstantlyLeads);
 router.get("/export/status/:jobId", getInstantlyExportStatus);
+
+router.post("/reset-pushed", resetOldPushedLeads);
 
 router.get("/templates", getTemplates);
 router.post("/templates", saveTemplate);

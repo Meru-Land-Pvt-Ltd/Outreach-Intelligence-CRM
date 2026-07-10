@@ -77,7 +77,7 @@ type ExportResult = {
 type ExportStatusResponse = {
   success?: boolean;
   jobId?: string;
-  status?: "running" | "completed" | "failed";
+  status?: "running" | "completed" | "failed" | "unknown";
   message?: string;
   error?: string;
   result?: ExportResult;
@@ -141,29 +141,65 @@ function clean(value: any) {
   return String(value || "").trim();
 }
 
+const NEGATIVE_BOUNCE_VALUES = [
+  "not bounced",
+  "not-bounced",
+  "no",
+  "false",
+  "0",
+  "-",
+  "none",
+  "safe",
+  "ok",
+];
+
 function getInstantlyBouncedStatus(lead: ImportedLead) {
-  const value =
-    clean(lead.instantlyBounced) ||
-    clean(lead.instantlyBounceStatus) ||
-    clean(lead.bouncedStatus) ||
-    clean(lead.bounceStatus) ||
-    clean(lead.raw?.instantlyBounced) ||
-    clean(lead.raw?.instantlyBounceStatus) ||
-    clean(lead.raw?.bouncedStatus) ||
-    clean(lead.raw?.bounceStatus);
+  const raw = lead.raw || {};
 
-  if (value) return value;
+  const candidates = [
+    lead.instantlyBounced,
+    lead.instantlyBounceStatus,
+    lead.bouncedStatus,
+    lead.bounceStatus,
+    raw.instantlyBounced,
+    raw.instantlyBounceStatus,
+    raw.bouncedStatus,
+    raw.bounceStatus,
+  ];
 
-  if (lead.isBounced || lead.raw?.isBounced) {
-    const reason = clean(lead.bounceReason || lead.raw?.bounceReason);
-    return reason ? `Bounced - ${reason}` : "Bounced";
+  let bounced = false;
+  let reason = clean(lead.bounceReason || raw.bounceReason);
+
+  for (const candidate of candidates) {
+    const value = clean(candidate);
+
+    if (!value) continue;
+
+    const lower = value.toLowerCase();
+
+    if (NEGATIVE_BOUNCE_VALUES.includes(lower)) continue;
+
+    if (lower.includes("bounce") || ["yes", "true", "1"].includes(lower)) {
+      bounced = true;
+
+      if (!reason) {
+        const embedded = value.match(/^bounced?\s*[-:]\s*(.+)$/i);
+        if (embedded) reason = embedded[1].trim();
+      }
+    }
   }
 
-  if (clean(lead.bouncedAt || lead.raw?.bouncedAt)) {
-    return "Bounced";
+  if (!bounced && (lead.isBounced === true || raw.isBounced === true)) {
+    bounced = true;
   }
 
-  return "Not bounced";
+  if (!bounced && clean(lead.bouncedAt || raw.bouncedAt || raw.instantlyBouncedAt)) {
+    bounced = true;
+  }
+
+  if (!bounced) return "Not bounced";
+
+  return reason ? `Bounced - ${reason}` : "Bounced";
 }
 
 function toChannel(value: string): Channel {
@@ -711,6 +747,7 @@ export default function InstantlyControlPanelPage() {
   const [messageType, setMessageType] = useState<MessageType>("info");
   const [loadingAction, setLoadingAction] = useState("");
   const [leadsExported, setLeadsExported] = useState(false);
+  const [resetArmed, setResetArmed] = useState(false);
 
   const [senderOptions, setSenderOptions] = useState<Record<Channel, string[]>>({
     "Enoylity Technology": FALLBACK_SENDERS["Enoylity Technology"],
@@ -886,17 +923,45 @@ export default function InstantlyControlPanelPage() {
     setLoadingAction("");
   }
 
-  async function waitForExportJob(jobId: string) {
-    for (let attempt = 0; attempt < 240; attempt += 1) {
-      await sleep(2000);
+  const EXPORT_POLL_MAX_ATTEMPTS = 60;
+  const EXPORT_POLL_INTERVAL_MS = 3000;
+  const EXPORT_POLL_MAX_MISSES = 5;
+
+  const EXPORT_BACKGROUND_MESSAGE =
+    "Export started in background. Please refresh after some time.";
+
+  type ExportWaitOutcome = {
+    status: "completed" | "failed" | "background";
+    result?: ExportResult;
+    message?: string;
+  };
+
+  async function waitForExportJob(jobId: string): Promise<ExportWaitOutcome> {
+    let consecutiveMisses = 0;
+
+    for (let attempt = 0; attempt < EXPORT_POLL_MAX_ATTEMPTS; attempt += 1) {
+      await sleep(EXPORT_POLL_INTERVAL_MS);
 
       const statusResponse = (await apiGet(
         `/instantly/export/status/${encodeURIComponent(jobId)}`
       )) as ExportStatusResponse | null;
 
       if (!statusResponse) {
+        consecutiveMisses += 1;
+
+        if (consecutiveMisses >= EXPORT_POLL_MAX_MISSES) {
+          return {
+            status: "background",
+            message:
+              "Export status is unavailable right now. " +
+              EXPORT_BACKGROUND_MESSAGE,
+          };
+        }
+
         continue;
       }
+
+      consecutiveMisses = 0;
 
       if (statusResponse.status === "running") {
         setMessageType("info");
@@ -905,19 +970,28 @@ export default function InstantlyControlPanelPage() {
       }
 
       if (statusResponse.status === "failed") {
-        throw new Error(
-          statusResponse.error || statusResponse.message || "Export failed."
-        );
+        return {
+          status: "failed",
+          message:
+            statusResponse.error || statusResponse.message || "Export failed.",
+        };
       }
 
       if (statusResponse.status === "completed") {
-        return statusResponse.result || {};
+        return { status: "completed", result: statusResponse.result || {} };
       }
+
+      // "unknown" or any unexpected status: stop polling gracefully.
+      return {
+        status: "background",
+        message: statusResponse.message || EXPORT_BACKGROUND_MESSAGE,
+      };
     }
 
-    throw new Error(
-      "Export is taking too long. Please refresh after a few minutes."
-    );
+    return {
+      status: "background",
+      message: "Export is still running. " + EXPORT_BACKGROUND_MESSAGE,
+    };
   }
 
   async function exportLeads() {
@@ -933,7 +1007,25 @@ export default function InstantlyControlPanelPage() {
       if (response?.jobId) {
         setMessageType("info");
         setMessage(response?.message || "Export is running in background...");
-        result = await waitForExportJob(response.jobId);
+
+        const outcome = await waitForExportJob(response.jobId);
+
+        if (outcome.status === "failed") {
+          setMessageType("error");
+          setMessage(outcome.message || "Export Leads failed.");
+          setLoadingAction("");
+          return;
+        }
+
+        if (outcome.status === "background") {
+          await loadImportedLeads(pushForm.channel);
+          setMessageType("info");
+          setMessage(outcome.message || EXPORT_BACKGROUND_MESSAGE);
+          setLoadingAction("");
+          return;
+        }
+
+        result = outcome.result;
       } else if (response?.success) {
         result = response;
       } else {
@@ -962,6 +1054,71 @@ export default function InstantlyControlPanelPage() {
   }
 
 
+
+  async function resetOldPushed() {
+    setLoadingAction("Reset Pushed");
+    setMessageType("info");
+    setMessage("Checking leads pushed more than 3 months ago...");
+
+    try {
+      if (!resetArmed) {
+        const response = (await apiPost("/instantly/reset-pushed", {
+          olderThanMonths: 3,
+        })) as {
+          success?: boolean;
+          message?: string;
+          matched?: number;
+        } | null;
+
+        if (!response?.success) {
+          setMessageType("error");
+          setMessage(response?.message || "Failed to check old pushed leads.");
+        } else if (!Number(response.matched || 0)) {
+          setMessageType("info");
+          setMessage("No leads were pushed more than 3 months ago. Nothing to reset.");
+        } else {
+          setResetArmed(true);
+          setMessageType("info");
+          setMessage(
+            `${response.matched} lead(s) were pushed over 3 months ago. ` +
+              "Click the reset button again to confirm."
+          );
+        }
+      } else {
+        const response = (await apiPost("/instantly/reset-pushed", {
+          olderThanMonths: 3,
+          confirm: true,
+        })) as {
+          success?: boolean;
+          message?: string;
+          modified?: number;
+        } | null;
+
+        setResetArmed(false);
+
+        if (response?.success) {
+          setMessageType("success");
+          setMessage(
+            response.message || `${response.modified || 0} lead(s) reset.`
+          );
+          await loadImportedLeads(pushForm.channel);
+        } else {
+          setMessageType("error");
+          setMessage(response?.message || "Failed to reset old pushed leads.");
+        }
+      }
+    } catch (error) {
+      setResetArmed(false);
+      setMessageType("error");
+      setMessage(
+        error instanceof Error
+          ? error.message
+          : "Failed to reset old pushed leads."
+      );
+    }
+
+    setLoadingAction("");
+  }
 
   async function pushSingle() {
     if (!hasPreparedLeads) {
@@ -1101,6 +1258,20 @@ export default function InstantlyControlPanelPage() {
               : hasPreparedLeads
                 ? "Re-export Leads"
                 : "Export Leads"}
+          </Button>
+
+          <Button
+            type="button"
+            variant="outline"
+            onClick={resetOldPushed}
+            disabled={busy}
+            className="h-12 rounded-xl !border-amber-200 !text-amber-700 hover:!bg-amber-50 disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            {loadingAction === "Reset Pushed"
+              ? "Working..."
+              : resetArmed
+                ? "Confirm Reset (3mo+)"
+                : "Reset Old Pushed (3mo+)"}
           </Button>
         </div>
 

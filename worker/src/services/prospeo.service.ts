@@ -314,7 +314,7 @@ function uniqueProspeoResults(results: any[]) {
   return unique;
 }
 
-export async function searchProspeoContacts(domain: string) {
+export async function searchProspeoContacts(domain: string, maxContactsWanted?: number) {
   if (!env.prospeoApiKey || env.prospeoApiKey.includes("your_")) {
     console.log("Prospeo skipped: PROSPEO_API_KEY missing");
     return [];
@@ -324,14 +324,29 @@ export async function searchProspeoContacts(domain: string) {
 
   if (!normalizedDomain) return [];
 
+  // Title-targeted search first; the broad (unfiltered) search only runs as a
+  // fallback when targeting found nobody, so credits go to relevant contacts.
   const targetedResults = await searchProspeoPages(normalizedDomain, true);
-  const broadResults = await searchProspeoPages(normalizedDomain, false);
+  const broadResults =
+    targetedResults.length > 0
+      ? []
+      : await searchProspeoPages(normalizedDomain, false);
   const results = uniqueProspeoResults([...targetedResults, ...broadResults]);
 
   const contacts = [];
-  const maxContacts = Math.max(1, Number(env.maxContactsPerBrand || 20));
+  const requested = Math.floor(Number(maxContactsWanted || 0));
+  const maxContacts =
+    requested > 0
+      ? Math.min(requested, Math.max(1, Number(env.maxContactsPerBrand || 20)))
+      : Math.max(1, Number(env.maxContactsPerBrand || 20));
 
-  for (const result of results.slice(0, maxContacts)) {
+  // Stop once enough contacts are collected; allow a few extra enrich
+  // attempts because some people fail to enrich or have no email.
+  const maxAttempts = Math.min(results.length, maxContacts * 3);
+
+  for (const result of results.slice(0, maxAttempts)) {
+    if (contacts.length >= maxContacts) break;
+
     const person = result.person || result;
     const company = result.company || {};
     const enriched = await enrichProspeoPerson(person, company, normalizedDomain);

@@ -2,6 +2,11 @@ import { Request, Response } from "express";
 import { ClosedDeal } from "../models/ClosedDeal.model";
 import { SeedBrand } from "../models/SeedBrand.model";
 import { ExcludedBrand } from "../models/ExcludedBrand.model";
+import {
+  buildExcludedBrandMatch,
+  normalizeBrandNameValue,
+  normalizeDomainValue
+} from "../utils/normalize";
 import { PipelineTracker } from "../models/PipelineTracker.model";
 import { NicheAnalysis } from "../models/NicheAnalysis.model";
 
@@ -90,7 +95,8 @@ export async function getExcludedBrands(req: Request, res: Response) {
 
 export async function createExcludedBrand(req: Request, res: Response) {
   try {
-    const { brandName, domain } = req.body;
+    const brandName = String(req.body?.brandName || "").trim();
+    const domain = normalizeDomainValue(req.body?.domain);
 
     if (!brandName && !domain) {
       return res.status(400).json({
@@ -99,14 +105,38 @@ export async function createExcludedBrand(req: Request, res: Response) {
       });
     }
 
-    const data = await ExcludedBrand.create({
-      brandName: brandName || "",
-      domain: domain || ""
-    });
+    const match = buildExcludedBrandMatch(brandName, domain);
+
+    // Atomic upsert. There is no unique index (legacy duplicates could exist),
+    // so a concurrent race can in theory still create a duplicate row; readers
+    // always match by $or over normalized + legacy fields, so duplicates are
+    // harmless for exclusion behavior.
+    const result: any = await ExcludedBrand.updateOne(
+      match as any,
+      {
+        $setOnInsert: {
+          brandName,
+          domain,
+          normalizedBrandName: normalizeBrandNameValue(brandName),
+          normalizedDomain: domain,
+          source: "manual"
+        }
+      },
+      { upsert: true }
+    );
+
+    const alreadyExcluded = !result.upsertedId;
+    const data = await ExcludedBrand.findOne(
+      result.upsertedId ? { _id: result.upsertedId } : (match as any)
+    );
 
     res.json({
       success: true,
-      data
+      data,
+      alreadyExcluded,
+      message: alreadyExcluded
+        ? "Brand is already in the Exclude List"
+        : "Brand added to the Exclude List"
     });
   } catch (error: any) {
     res.status(500).json({ success: false, message: error.message });

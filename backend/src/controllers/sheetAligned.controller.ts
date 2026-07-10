@@ -9,7 +9,11 @@ import { RunLog } from "../models/RunLog.model";
 import { InstantlyLead } from "../models/InstantlyLead.model";
 import { InstantlyTemplate } from "../models/InstantlyTemplate.model";
 import { PushLog } from "../models/PushLog.model";
-import { scheduleInstantlyBackendMaintenance } from "./instantly.controller";
+import {
+  getInstantlyBouncedStatusForResponse,
+  getVerificationStatusForResponse,
+  scheduleInstantlyBackendMaintenance
+} from "./instantly.controller";
 
 const EmailDiscoveryModel = EmailDiscovery as any;
 const HunterRawContactModel = HunterRawContact as any;
@@ -83,56 +87,6 @@ function ok(res: Response, data: any[]) {
   });
 }
 
-
-function cleanText(value: any) {
-  return String(value || "").trim();
-}
-
-function getInstantlyBouncedStatusForResponse(lead: any) {
-  const value =
-    cleanText(lead.instantlyBounced) ||
-    cleanText(lead.instantlyBounceStatus) ||
-    cleanText(lead.bouncedStatus) ||
-    cleanText(lead.bounceStatus) ||
-    cleanText(lead.raw?.instantlyBounced) ||
-    cleanText(lead.raw?.instantlyBounceStatus) ||
-    cleanText(lead.raw?.bouncedStatus) ||
-    cleanText(lead.raw?.bounceStatus);
-
-  if (value) return value;
-
-  if (lead.isBounced || lead.raw?.isBounced) {
-    const reason = cleanText(lead.bounceReason || lead.raw?.bounceReason);
-    return reason ? `Bounced - ${reason}` : "Bounced";
-  }
-
-  if (cleanText(lead.bouncedAt || lead.raw?.bouncedAt)) {
-    return "Bounced";
-  }
-
-  return "Not bounced";
-}
-
-function isInstantlyBouncedValue(value: any) {
-  const lower = cleanText(value).toLowerCase();
-
-  if (!lower) return false;
-
-  return lower.includes("bounce");
-}
-
-function getVerificationStatusForResponse(lead: any) {
-  const verificationStatus = cleanText(lead?.verificationStatus);
-
-  if (
-    verificationStatus.toLowerCase() === "bounced" &&
-    isInstantlyBouncedValue(getInstantlyBouncedStatusForResponse(lead))
-  ) {
-    return "Pending Verification";
-  }
-
-  return verificationStatus;
-}
 
 function normalizeInstantlyLeadForResponse(row: any) {
   const lead = row?.toObject ? row.toObject() : row;

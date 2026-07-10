@@ -6,6 +6,13 @@ import { Pause, Play, Plus, Square } from "lucide-react";
 import { apiGet, apiPost } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { Notice } from "@/components/shared/notice";
 import AdminTable, {
   type AdminTableColumn,
@@ -26,11 +33,45 @@ type SeedDeal = {
   email?: string;
   totalDealAmount?: number;
   crawlCount?: number;
+  crawlLimit?: number;
   status?: string;
   createdAt?: string;
   updatedAt?: string;
   raw?: any;
 };
+
+type SeedSummaryRow = {
+  seedBrandId?: string;
+  seedBrandName?: string;
+  month?: string;
+  status?: string;
+  crawlLimit?: number;
+  brandsFound?: number;
+  brandsSelected?: number;
+  brandsExcluded?: number;
+  contactsFound?: number;
+  contactsSelected?: number;
+  pushed?: number;
+  bounced?: number;
+  replies?: number | null;
+  deals?: number;
+  creditsUsed?: number;
+  creditUsageType?: string;
+  creditsPerSelectedBrand?: number | null;
+  creditsPerPushedLead?: number | null;
+};
+
+const CRAWL_LIMIT_OPTIONS = [
+  { label: "50 brands", value: "50" },
+  { label: "100 brands", value: "100" },
+  { label: "150 brands", value: "150" },
+  { label: "No limit", value: "0" },
+  { label: "Custom...", value: "custom" },
+];
+
+function getSeedCrawlLimit(row: SeedDeal) {
+  return Number(row.crawlLimit || row.raw?.crawlLimit || 0);
+}
 
 type CrawlJob = {
   _id?: string;
@@ -297,6 +338,7 @@ export default function ControlPanelPage() {
   const [seedDeals, setSeedDeals] = useState<SeedDeal[]>([]);
   const [activeCrawls, setActiveCrawls] = useState<CrawlJob[]>([]);
   const [historyCrawls, setHistoryCrawls] = useState<CrawlJob[]>([]);
+  const [seedSummary, setSeedSummary] = useState<SeedSummaryRow[]>([]);
 
   const [notice, setNotice] = useState<NoticeState | null>(null);
   const [loading, setLoading] = useState(true);
@@ -314,7 +356,18 @@ export default function ControlPanelPage() {
     brandName: "",
     email: "",
     totalDealAmount: "",
+    crawlLimit: "50",
+    customCrawlLimit: "",
   });
+
+  function getResolvedCrawlLimit() {
+    if (form.crawlLimit === "custom") {
+      const custom = Number(form.customCrawlLimit || 0);
+      return Number.isFinite(custom) && custom > 0 ? Math.floor(custom) : 0;
+    }
+
+    return Number(form.crawlLimit || 0);
+  }
 
   async function loadSeedDeals() {
     try {
@@ -343,6 +396,15 @@ export default function ControlPanelPage() {
     }
   }
 
+  async function loadSeedSummary() {
+    try {
+      const response = await apiGet("/reports/seed-summary");
+      setSeedSummary(response?.data || []);
+    } catch {
+      setSeedSummary([]);
+    }
+  }
+
   async function refreshAll() {
     setLoading(true);
 
@@ -350,6 +412,7 @@ export default function ControlPanelPage() {
       loadSeedDeals(),
       loadActiveCrawls(),
       loadHistoryCrawls(),
+      loadSeedSummary(),
     ]);
 
     setLoading(false);
@@ -381,6 +444,7 @@ export default function ControlPanelPage() {
         brandName: form.brandName,
         email: form.email,
         totalDealAmount: Number(form.totalDealAmount || 0),
+        crawlLimit: getResolvedCrawlLimit(),
       });
 
       if (!response?.success) {
@@ -399,6 +463,8 @@ export default function ControlPanelPage() {
         brandName: "",
         email: "",
         totalDealAmount: "",
+        crawlLimit: "50",
+        customCrawlLimit: "",
       });
 
       setNotice({
@@ -642,6 +708,93 @@ export default function ControlPanelPage() {
     [seedDeals]
   );
 
+  const seedSummaryColumns = useMemo<AdminTableColumn<SeedSummaryRow>[]>(
+    () => [
+      {
+        id: "seedBrandName",
+        header: "Seed Brand",
+        widthClassName: "min-w-[180px]",
+        render: (row) => (
+          <span className="font-semibold text-slate-950">
+            {row.seedBrandName || "-"}
+          </span>
+        ),
+      },
+      {
+        id: "brands",
+        header: "Brands (found / selected / excluded)",
+        widthClassName: "min-w-[220px]",
+        render: (row) =>
+          `${row.brandsFound || 0} / ${row.brandsSelected || 0} / ${row.brandsExcluded || 0}`,
+      },
+      {
+        id: "contacts",
+        header: "Contacts (found / selected)",
+        widthClassName: "min-w-[190px]",
+        render: (row) => `${row.contactsFound || 0} / ${row.contactsSelected || 0}`,
+      },
+      {
+        id: "pushed",
+        header: "Pushed",
+        align: "center",
+        widthClassName: "min-w-[90px]",
+        render: (row) => row.pushed || 0,
+      },
+      {
+        id: "bounced",
+        header: "Bounced",
+        align: "center",
+        widthClassName: "min-w-[90px]",
+        render: (row) => row.bounced || 0,
+      },
+      {
+        id: "deals",
+        header: "Deals",
+        align: "center",
+        widthClassName: "min-w-[80px]",
+        render: (row) => row.deals || 0,
+      },
+      {
+        id: "credits",
+        header: "Credits",
+        widthClassName: "min-w-[140px]",
+        render: (row) =>
+          row.creditsUsed
+            ? `${row.creditsUsed}${row.creditUsageType ? ` (${row.creditUsageType})` : ""}`
+            : "0",
+      },
+      {
+        id: "creditsPerBrand",
+        header: "Credits / Selected Brand",
+        align: "center",
+        widthClassName: "min-w-[170px]",
+        render: (row) =>
+          row.creditsPerSelectedBrand === null ||
+          row.creditsPerSelectedBrand === undefined
+            ? "-"
+            : row.creditsPerSelectedBrand,
+      },
+      {
+        id: "creditsPerLead",
+        header: "Credits / Pushed Lead",
+        align: "center",
+        widthClassName: "min-w-[160px]",
+        render: (row) =>
+          row.creditsPerPushedLead === null ||
+          row.creditsPerPushedLead === undefined
+            ? "-"
+            : row.creditsPerPushedLead,
+      },
+      {
+        id: "status",
+        header: "Status",
+        widthClassName: "min-w-[120px]",
+        render: (row) => <StatusBadge status={row.status} />,
+      },
+    ],
+    []
+  );
+
   const seedDealColumns = useMemo<AdminTableColumn<SeedDeal>[]>(
     () => [
       {
@@ -705,6 +858,16 @@ export default function ControlPanelPage() {
         align: "center",
         widthClassName: "min-w-[100px]",
         render: (row) => Number(row.crawlCount || 0),
+      },
+      {
+        id: "crawlLimit",
+        header: "Limit",
+        align: "center",
+        widthClassName: "min-w-[100px]",
+        render: (row) => {
+          const limit = getSeedCrawlLimit(row);
+          return limit > 0 ? limit : "No limit";
+        },
       },
       {
         id: "status",
@@ -841,6 +1004,55 @@ export default function ControlPanelPage() {
                 }
                 className="h-12 border-slate-200"
               />
+            </label>
+
+            <label className="space-y-2">
+              <span className="text-sm font-semibold text-slate-800">
+                Brand Limit per Crawl
+              </span>
+
+              <div className="flex gap-3">
+                <Select
+                  value={form.crawlLimit}
+                  onValueChange={(value) =>
+                    setForm((prev) => ({ ...prev, crawlLimit: value }))
+                  }
+                >
+                  <SelectTrigger className="h-12 w-full border-slate-200">
+                    <SelectValue placeholder="Brand limit" />
+                  </SelectTrigger>
+
+                  <SelectContent>
+                    {CRAWL_LIMIT_OPTIONS.map((option) => (
+                      <SelectItem key={option.value} value={option.value}>
+                        {option.label}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+
+                {form.crawlLimit === "custom" ? (
+                  <Input
+                    placeholder="e.g. 75"
+                    type="number"
+                    min="1"
+                    max="5000"
+                    value={form.customCrawlLimit}
+                    onChange={(e) =>
+                      setForm((prev) => ({
+                        ...prev,
+                        customCrawlLimit: e.target.value,
+                      }))
+                    }
+                    className="h-12 w-32 border-slate-200"
+                  />
+                ) : null}
+              </div>
+
+              <span className="text-xs font-medium text-slate-500">
+                Max new brands this seed crawl can add to Brand Map. Enforced by
+                the worker.
+              </span>
             </label>
           </div>
 
@@ -986,6 +1198,19 @@ export default function ControlPanelPage() {
             showSummary: true,
             showRowsSelector: false,
           }}
+        />
+      </Section>
+
+      <Section title="Seed Summary (credits vs results)">
+        <AdminTable
+          data={seedSummary}
+          columns={seedSummaryColumns}
+          rowKey={(row, index) => row.seedBrandId || String(index)}
+          loading={loading}
+          loadingRows={4}
+          emptyTitle={loading ? "Loading seed summary..." : "No seed summary yet."}
+          emptyDescription="Per-seed results appear here after crawls run."
+          containerClassName="rounded-xl shadow-none"
         />
       </Section>
     </main>

@@ -24,6 +24,8 @@ const EmailDiscoverySchema = new mongoose.Schema(
     brandMapId: { type: mongoose.Schema.Types.ObjectId, default: null },
 
     status: { type: String, default: "pending" },
+    discoveryStatus: { type: Object, default: {} },
+    contactsSelected: { type: Number, default: 0 },
     raw: { type: Object, default: {} }
   },
   { timestamps: true }

@@ -6,7 +6,10 @@ import { analyzeUnprocessedRawVideos } from "../services/rawVideoAnalysis.servic
 import { buildBrandMapForSeedBrand } from "../services/brandMap.service";
 import { rebuildNicheAnalysis } from "../services/nicheAnalysis.service";
 import { fillMissingDomainsForSeed } from "../services/domainFinder.service";
-import { discoverEmailsForPendingBrands } from "../services/emailDiscovery.service";
+import {
+  discoverEmailsForPendingBrands,
+  discoverEmailsForSelectedBrandMaps
+} from "../services/emailDiscovery.service";
 import { verifyPendingContacts } from "../services/emailVerifier.service";
 import { exportBrandToInstantlyTabs } from "../services/instantlyExport.service";
 import { fillInstantlyLeadCompetitors } from "../services/competitor.service";
@@ -59,6 +62,14 @@ const SeedBrand: any =
 
 function cleanText(value: any) {
   return String(value || "").trim();
+}
+
+function envFlag(name: string, fallback: boolean) {
+  const value = process.env[name];
+
+  if (value === undefined || value === null || value === "") return fallback;
+
+  return String(value).toLowerCase() === "true";
 }
 
 class CrawlStoppedError extends Error {
@@ -254,18 +265,30 @@ async function incrementClosedDealCrawlCount(seedBrand: any, seedBrandId: string
 }
 
 async function getDiscoveredBrandMaps(seedBrandId: string, seedBrandName: string) {
+  // Brands with a KNOWN PGA below the threshold must never be auto-pushed.
+  // Brands without a PGA score are still allowed (legacy behavior) so the
+  // automatic flow keeps working before anyone runs Find Intent.
+  const minPga = Math.max(0, Number(process.env.AUTO_EXPORT_MIN_PGA || 80));
+
   return BrandMapModel.find({
     isExcluded: { $ne: true },
     domain: {
       $exists: true,
       $nin: ["", "-", null, "N/A", "unspecified"]
     },
-    $or: [
+    $and: [
       {
-        seedBrandId
+        $or: [
+          { seedBrandId },
+          { foundVia: seedBrandName }
+        ]
       },
       {
-        foundVia: seedBrandName
+        $or: [
+          { pgaScore: { $exists: false } },
+          { pgaScore: null },
+          { pgaScore: { $gte: minPga } }
+        ]
       }
     ]
   }).sort({
@@ -357,6 +380,36 @@ export async function intelligenceProcessor(job: Job) {
         result
       };
     }
+
+    if (job.name === "discover-selected-emails") {
+      const brandMapIds = Array.isArray(job.data?.brandMapIds)
+        ? job.data.brandMapIds
+        : [];
+
+      await updateProgress(
+        job,
+        jobId,
+        "SELECTED_EMAIL_DISCOVERY_STARTED_" + brandMapIds.length + "_BRANDS",
+        10
+      );
+
+      const discoveryResult = await discoverEmailsForSelectedBrandMaps(brandMapIds);
+
+      await updateProgress(job, jobId, "SELECTED_EMAIL_DISCOVERY_VERIFYING", 80);
+
+      const verificationResult = await verifyPendingContacts();
+
+      await markJobCompleted(jobId, "SELECTED_EMAIL_DISCOVERY_COMPLETE", {
+        discoveryResult,
+        verificationResult
+      });
+
+      return {
+        success: true,
+        discoveryResult,
+        verificationResult
+      };
+    }
     const seedBrand: any = await SeedBrand.findById(seedBrandId).lean();
 
     if (!seedBrand) {
@@ -365,6 +418,10 @@ export async function intelligenceProcessor(job: Job) {
 
     const seedBrandName = cleanText(seedBrand.brandName);
     const seedProductName = cleanText(seedBrand.productName);
+    const seedCrawlLimit = Math.max(
+      0,
+      Number(seedBrand.crawlLimit || seedBrand.brandLimit || seedBrand.maxBrands || 0)
+    );
 
     if (!seedBrandName) {
       throw new Error("Seed brand name is missing");
@@ -396,6 +453,7 @@ export async function intelligenceProcessor(job: Job) {
       seedBrandId,
       brandName: seedBrandName,
       productName: seedProductName,
+      crawlLimit: seedCrawlLimit,
       checkControl: () => enforceCrawlerControl(jobId)
     });
 
@@ -422,7 +480,10 @@ export async function intelligenceProcessor(job: Job) {
 
     await updateProgress(job, jobId, "FILL_BRAND_MAP_STARTED", 50);
 
-    const brandMapResult = await buildBrandMapForSeedBrand(seedBrandId);
+    const brandMapResult = await buildBrandMapForSeedBrand(seedBrandId, {
+      maxBrands: seedCrawlLimit,
+      checkControl: () => enforceCrawlerControl(jobId)
+    });
 
     await updateProgress(
       job,
@@ -459,22 +520,47 @@ export async function intelligenceProcessor(job: Job) {
       76
     );
 
-    await updateProgress(job, jobId, "EMAIL_DISCOVERY_STARTED", 80);
+    // Manual-mode feature flags. The required workflow is manual:
+    // crawl -> Brand Map -> marketing selects brands -> Find Emails ->
+    // manual push to Enoylity/MHD. Both automatic stages therefore default
+    // to DISABLED; set the env var to "true" to re-enable the old auto flow.
+    const autoEmailDiscoveryEnabled = envFlag("AUTO_EMAIL_DISCOVERY_ENABLED", false);
+    const autoInstantlyExportEnabled = envFlag("AUTO_INSTANTLY_EXPORT_ENABLED", false);
 
-    const emailDiscoveryResult = await discoverEmailsForPendingBrands(
-      seedBrandName
-    );
+    let emailDiscoveryResult: any;
 
-    console.log("Email discovery result:", emailDiscoveryResult);
+    if (autoEmailDiscoveryEnabled) {
+      await updateProgress(job, jobId, "EMAIL_DISCOVERY_STARTED", 80);
 
-    await updateProgress(
-      job,
-      jobId,
-      "EMAIL_DISCOVERY_DONE_" +
-        emailDiscoveryResult.processed +
-        "_BRANDS",
-      88
-    );
+      emailDiscoveryResult = await discoverEmailsForPendingBrands(
+        seedBrandName,
+        () => enforceCrawlerControl(jobId)
+      );
+
+      console.log("Email discovery result:", emailDiscoveryResult);
+
+      await updateProgress(
+        job,
+        jobId,
+        "EMAIL_DISCOVERY_DONE_" +
+          emailDiscoveryResult.processed +
+          "_BRANDS",
+        88
+      );
+    } else {
+      emailDiscoveryResult = {
+        scanned: 0,
+        processed: 0,
+        skipped: "AUTO_EMAIL_DISCOVERY_ENABLED=false (manual mode)"
+      };
+
+      console.log(
+        "EMAIL DISCOVERY SKIPPED: manual mode is active (AUTO_EMAIL_DISCOVERY_ENABLED=false). " +
+          "Use Brand Map -> Find Emails for selected brands."
+      );
+
+      await updateProgress(job, jobId, "EMAIL_DISCOVERY_SKIPPED_MANUAL_MODE", 88);
+    }
 
     await updateProgress(job, jobId, "EMAIL_VERIFICATION_STARTED", 92);
 
@@ -491,25 +577,45 @@ export async function intelligenceProcessor(job: Job) {
       95
     );
 
-    await updateProgress(job, jobId, "INSTANTLY_EXPORT_STARTED", 96);
+    let instantlyExportResult: any;
 
-    const instantlyExportResult = await exportDiscoveredBrandsToInstantly(
-      job,
-      jobId,
-      seedBrandId,
-      seedBrandName
-    );
+    if (autoInstantlyExportEnabled) {
+      await updateProgress(job, jobId, "INSTANTLY_EXPORT_STARTED", 96);
 
-    console.log("Instantly export result:", instantlyExportResult);
+      instantlyExportResult = await exportDiscoveredBrandsToInstantly(
+        job,
+        jobId,
+        seedBrandId,
+        seedBrandName
+      );
 
-    await updateProgress(
-      job,
-      jobId,
-      "INSTANTLY_EXPORT_DONE_" +
-        instantlyExportResult.exportedRows +
-        "_ROWS",
-      97
-    );
+      console.log("Instantly export result:", instantlyExportResult);
+
+      await updateProgress(
+        job,
+        jobId,
+        "INSTANTLY_EXPORT_DONE_" +
+          instantlyExportResult.exportedRows +
+          "_ROWS",
+        97
+      );
+    } else {
+      instantlyExportResult = {
+        brandsScanned: 0,
+        exportedBrands: 0,
+        exportedRows: 0,
+        skippedAlreadyExported: 0,
+        contactsNormalized: 0,
+        skipped: "AUTO_INSTANTLY_EXPORT_ENABLED=false (manual mode)"
+      };
+
+      console.log(
+        "INSTANTLY EXPORT SKIPPED: manual mode is active (AUTO_INSTANTLY_EXPORT_ENABLED=false). " +
+          "Use Brand Map -> Push to Enoylity/MHD for selected brands."
+      );
+
+      await updateProgress(job, jobId, "INSTANTLY_EXPORT_SKIPPED_MANUAL_MODE", 97);
+    }
 
     await updateProgress(job, jobId, "INSTANTLY_COMPETITORS_STARTED", 98);
 

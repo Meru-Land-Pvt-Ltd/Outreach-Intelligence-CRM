@@ -3,16 +3,20 @@ import axios from "axios";
 import { BrandMap } from "../models/BrandMap.model";
 import { Contact } from "../models/Contact.model";
 import { EmailDiscovery } from "../models/EmailDiscovery.model";
+import { ExcludedBrand } from "../models/ExcludedBrand.model";
 import { HunterRawContact } from "../models/HunterRawContact.model";
 import { ApolloRawContact } from "../models/ApolloRawContact.model";
 import { ProspeoRawContact } from "../models/ProspeoRawContact.model";
 import { PipelineTracker } from "../models/PipelineTracker.model";
 import { logDone, logError } from "./runLog.service";
+import { logCreditUsage } from "./creditUsage.service";
 import { searchProspeoContacts } from "./prospeo.service";
+import { buildExcludedBrandMatch } from "../utils/normalize";
 
 const BrandMapModel = BrandMap as any;
 const ContactModel = Contact as any;
 const EmailDiscoveryModel = EmailDiscovery as any;
+const ExcludedBrandModel = ExcludedBrand as any;
 const HunterRawContactModel = HunterRawContact as any;
 const ApolloRawContactModel = ApolloRawContact as any;
 const ProspeoRawContactModel = ProspeoRawContact as any;
@@ -200,6 +204,169 @@ function normalizeHunterEmailStatus(value: any, hasEmail = false) {
 function uniqueEmails(emails: string[]) {
   return Array.from(new Set(emails.map(cleanEmail))).filter(isValidEmail);
 }
+
+// --- Outreach quality rules (Phase 4) ---------------------------------------
+
+const AVOID_EMAIL_LOCAL_WORDS = [
+  "careers",
+  "career",
+  "jobs",
+  "job",
+  "recruit",
+  "recruiting",
+  "recruitment",
+  "talent",
+  "hr",
+  "humanresources",
+  "legal",
+  "counsel",
+  "compliance",
+  "billing",
+  "payroll",
+  "finance",
+  "accounting",
+  "accounts",
+  "invoice",
+  "privacy",
+  "abuse",
+  "webmaster",
+  "postmaster",
+  "unsubscribe",
+  "newsletter"
+];
+
+const RELEVANT_TITLE_KEYWORDS = [
+  "marketing",
+  "influencer",
+  "creator",
+  "partnership",
+  "brand",
+  "public relations",
+  "communication",
+  "comms",
+  "growth",
+  "business development",
+  "sponsorship",
+  "collab",
+  "media",
+  "social",
+  "sales",
+  "product",
+  "operations",
+  "founder",
+  "co-founder",
+  "cofounder",
+  "ceo",
+  "cmo",
+  "owner",
+  "president"
+];
+
+const AVOID_TITLE_KEYWORDS = [
+  "human resources",
+  "recruiter",
+  "recruiting",
+  "talent acquisition",
+  "legal",
+  "counsel",
+  "paralegal",
+  "attorney",
+  "accountant",
+  "accounting",
+  "finance",
+  "financial",
+  "controller",
+  "payroll",
+  "bookkeep",
+  "software engineer",
+  "backend engineer",
+  "frontend engineer",
+  "fullstack engineer",
+  "developer",
+  "devops",
+  "sre",
+  "qa engineer",
+  "data engineer",
+  "support engineer",
+  "warehouse",
+  "driver"
+];
+
+function localPartMatchesWord(local: string, word: string) {
+  if (local === word) return true;
+
+  for (const sep of [".", "-", "_", "+"]) {
+    if (local.startsWith(word + sep)) return true;
+    if (local.endsWith(sep + word)) return true;
+    if (local.includes(sep + word + sep)) return true;
+  }
+
+  return false;
+}
+
+function isLowQualityOutreachEmail(email: string) {
+  const local = String(email || "").split("@")[0].toLowerCase();
+
+  if (!local) return true;
+
+  return AVOID_EMAIL_LOCAL_WORDS.some((word) => localPartMatchesWord(local, word));
+}
+
+function isRelevantTitle(title: string) {
+  const lower = String(title || "").toLowerCase();
+
+  if (!lower.trim()) return false;
+  if (/\bpr\b/.test(lower)) return true;
+
+  return RELEVANT_TITLE_KEYWORDS.some((keyword) => lower.includes(keyword));
+}
+
+function isUsableProviderContact(title: string, email: string) {
+  if (email && isLowQualityOutreachEmail(email)) return false;
+
+  const lower = String(title || "").toLowerCase();
+
+  if (
+    lower.trim() &&
+    AVOID_TITLE_KEYWORDS.some((keyword) => lower.includes(keyword)) &&
+    !isRelevantTitle(title)
+  ) {
+    return false;
+  }
+
+  return true;
+}
+
+function prioritizeEmailsForOutreach(emails: string[]) {
+  return [...emails]
+    .filter((email) => !isLowQualityOutreachEmail(email))
+    .sort((a, b) => Number(isGenericEmail(a)) - Number(isGenericEmail(b)));
+}
+
+function maxEmailsPerBrand() {
+  const value = Number(process.env.MAX_EMAILS_PER_BRAND || 4);
+
+  return Number.isFinite(value) && value > 0 ? Math.min(Math.floor(value), 10) : 4;
+}
+
+async function countUsableContacts(brandName: string, domain: string) {
+  return ContactModel.countDocuments({
+    brandName,
+    domain,
+    email: { $exists: true, $nin: ["", null] },
+    status: { $nin: ["invalid", "bounced", "skipped"] }
+  });
+}
+
+async function isBrandExcludedForDiscovery(brandName: string, domain: string) {
+  const match = buildExcludedBrandMatch(brandName, domain);
+
+  if (!match) return false;
+
+  return Boolean(await ExcludedBrandModel.findOne(match));
+}
+
+// -----------------------------------------------------------------------------
 
 function extractEmails(text: string) {
   const matches = String(text || "").match(EMAIL_REGEX) || [];
@@ -566,17 +733,21 @@ async function saveContact(input: {
   return true;
 }
 
-async function discoverHunter(brandName: string, domain: string) {
+async function discoverHunter(brandName: string, domain: string, needed: number) {
   const key = process.env.HUNTER_API_KEY || "";
   const baseUrl = process.env.HUNTER_BASE_URL || "https://api.hunter.io/v2";
 
   if (!key) return [];
+  if (needed <= 0) return [];
 
   try {
     const response = await axios.get(baseUrl + "/domain-search", {
       params: {
         domain,
         api_key: key,
+        department:
+          process.env.HUNTER_DEPARTMENTS ||
+          "marketing,sales,management,communication,executive,operations",
         limit: Number(process.env.HUNTER_LIMIT || 10)
       },
       timeout: 30000,
@@ -584,6 +755,16 @@ async function discoverHunter(brandName: string, domain: string) {
     });
 
     const rows = response.data?.data?.emails || [];
+
+    await logCreditUsage({
+      provider: "hunter",
+      action: "domain-search",
+      brandName,
+      domain,
+      credits: 1,
+      emailsFound: rows.length
+    });
+
     const emails: string[] = [];
 
     for (const item of rows) {
@@ -613,6 +794,9 @@ async function discoverHunter(brandName: string, domain: string) {
         },
         { upsert: true, new: true }
       );
+
+      if (emails.length >= needed) continue;
+      if (!isUsableProviderContact(cleanText(item.position), email)) continue;
 
       await saveContact({
         brandName,
@@ -692,11 +876,38 @@ async function aiSelectApolloPOCs(brandName: string, people: any[]) {
   }
 }
 
-async function discoverApollo(brandName: string, domain: string) {
+function getApolloPersonTitles() {
+  const fromEnv = String(process.env.APOLLO_PERSON_TITLES || "")
+    .split(",")
+    .map((item) => item.trim())
+    .filter(Boolean);
+
+  if (fromEnv.length > 0) return fromEnv;
+
+  return [
+    "Marketing Manager",
+    "Influencer Marketing Manager",
+    "Creator Partnerships",
+    "Partnerships Manager",
+    "Brand Manager",
+    "PR Manager",
+    "Communications Manager",
+    "Growth Manager",
+    "Product Marketing Manager",
+    "Business Development Manager",
+    "Head of Marketing",
+    "VP Marketing",
+    "Founder",
+    "Co-Founder"
+  ];
+}
+
+async function discoverApollo(brandName: string, domain: string, needed: number) {
   const key = process.env.APOLLO_API_KEY || "";
   const baseUrl = process.env.APOLLO_BASE_URL || "https://api.apollo.io/api/v1";
 
   if (!key) return [];
+  if (needed <= 0) return [];
 
   try {
     const allPeople: any[] = [];
@@ -710,6 +921,7 @@ async function discoverApollo(brandName: string, domain: string) {
             "/mixed_people/api_search"),
         {
           q_organization_domains: domain,
+          person_titles: getApolloPersonTitles(),
           page,
           per_page: perPage
         },
@@ -724,6 +936,15 @@ async function discoverApollo(brandName: string, domain: string) {
       );
 
       const people = response.data?.people || [];
+
+      await logCreditUsage({
+        provider: "apollo",
+        action: "people-search",
+        brandName,
+        domain,
+        credits: 1,
+        emailsFound: people.length
+      });
 
       if (!people.length) break;
 
@@ -763,10 +984,16 @@ async function discoverApollo(brandName: string, domain: string) {
       if (people.length < perPage) break;
     }
 
-    const selected = await aiSelectApolloPOCs(brandName, allPeople);
+    const usablePeople = allPeople.filter((person) =>
+      isUsableProviderContact(cleanText(person.title), cleanEmail(person.email))
+    );
+
+    const selected = await aiSelectApolloPOCs(brandName, usablePeople);
     const emails: string[] = [];
 
     for (const person of selected) {
+      if (emails.length >= needed) break;
+
       let email = cleanEmail(person.email);
 
       if (!email) {
@@ -800,9 +1027,22 @@ async function discoverApollo(brandName: string, domain: string) {
               reveal.data?.people?.[0]?.email ||
               reveal.data?.person?.email
           );
+
+          await logCreditUsage({
+            provider: "apollo",
+            action: "reveal",
+            brandName,
+            domain,
+            credits: 1,
+            emailsFound: email ? 1 : 0
+          });
         } catch {
           // skip reveal failure
         }
+      }
+
+      if (email && isLowQualityOutreachEmail(email)) {
+        continue;
       }
 
       const fullName = cleanText(
@@ -847,16 +1087,32 @@ async function discoverApollo(brandName: string, domain: string) {
   }
 }
 
-async function discoverProspeo(brandName: string, domain: string) {
+async function discoverProspeo(brandName: string, domain: string, needed: number) {
   if (!process.env.PROSPEO_API_KEY) return [];
+  if (needed <= 0) return [];
 
   try {
-    const contacts = await searchProspeoContacts(domain);
+    const contacts = await searchProspeoContacts(domain, needed);
+
+    await logCreditUsage({
+      provider: "prospeo",
+      action: "search-and-enrich",
+      brandName,
+      domain,
+      credits: contacts.length,
+      emailsFound: contacts.length
+    });
+
     const emails: string[] = [];
 
-    for (const contact of contacts.slice(0, 10)) {
+    for (const contact of contacts) {
+      if (emails.length >= needed) break;
+
       const email = cleanEmail(contact.email);
       if (!isValidEmail(email)) continue;
+      if (!isUsableProviderContact(cleanText(contact.designation || contact.role), email)) {
+        continue;
+      }
 
       const fullName = cleanText(contact.fullName);
       const title = cleanText(contact.designation || contact.role);
@@ -902,7 +1158,10 @@ async function discoverProspeo(brandName: string, domain: string) {
   }
 }
 
-export async function discoverEmailsForBrandMap(brandMap: any) {
+export async function discoverEmailsForBrandMap(
+  brandMap: any,
+  options: { fromSelectedJob?: boolean } = {}
+) {
   const brandName = cleanText(brandMap.brandName);
   const domain = normalizeDomain(brandMap.domain);
 
@@ -911,6 +1170,20 @@ export async function discoverEmailsForBrandMap(brandMap: any) {
       brandName,
       domain,
       status: "skipped",
+      saved: 0
+    };
+  }
+
+  // Excluded brands must never reach discovery (and never spend paid credits),
+  // regardless of how this function was reached.
+  if (
+    brandMap.isExcluded === true ||
+    (await isBrandExcludedForDiscovery(brandName, domain))
+  ) {
+    return {
+      brandName,
+      domain,
+      status: "skipped_excluded",
       saved: 0
     };
   }
@@ -939,6 +1212,25 @@ export async function discoverEmailsForBrandMap(brandMap: any) {
     }
   }
 
+  const emailCap = maxEmailsPerBrand();
+
+  // Paid providers only run for manually selected brands or explicit
+  // selected-brand jobs. EMAIL_DISCOVERY_ALLOW_UNSELECTED_PROVIDERS=true is a
+  // documented escape hatch for the legacy automatic behavior.
+  const allowPaidProviders =
+    options.fromSelectedJob === true ||
+    brandMap.isSelected === true ||
+    String(process.env.EMAIL_DISCOVERY_ALLOW_UNSELECTED_PROVIDERS || "false")
+      .toLowerCase() === "true";
+
+  const stageStatus: Record<string, any> = {
+    internalScrape: "running",
+    hunter: "pending",
+    apollo: "pending",
+    prospeo: "pending"
+  };
+
+  // Step 1: built-in website/social scrape first — free, no provider credits.
   const social = await discoverWebsiteAndSocial(brandName, domain);
 
   const socialEmails = uniqueEmails([
@@ -950,7 +1242,14 @@ export async function discoverEmailsForBrandMap(brandMap: any) {
     ...social.website.emails
   ]);
 
-  for (const email of socialEmails) {
+  let usableCount = await countUsableContacts(brandName, domain);
+
+  const socialToSave = prioritizeEmailsForOutreach(socialEmails).slice(
+    0,
+    Math.max(0, emailCap - usableCount)
+  );
+
+  for (const email of socialToSave) {
     await saveContact({
       brandName,
       domain,
@@ -959,9 +1258,57 @@ export async function discoverEmailsForBrandMap(brandMap: any) {
     });
   }
 
-  const hunterEmails = await discoverHunter(brandName, domain);
-  const apolloEmails = await discoverApollo(brandName, domain);
-  const prospeoEmails = await discoverProspeo(brandName, domain);
+  stageStatus.internalScrape =
+    "completed (" +
+    socialEmails.length +
+    " email(s) found, " +
+    socialToSave.length +
+    " saved)";
+
+  // Step 2: paid providers only when the internal scrape did not find enough
+  // good contacts, and only for the remaining amount (max 3-4 per brand).
+  usableCount = await countUsableContacts(brandName, domain);
+
+  let hunterEmails: string[] = [];
+  let apolloEmails: string[] = [];
+  let prospeoEmails: string[] = [];
+
+  const providerGateReason = !allowPaidProviders
+    ? "skipped: brand not selected — paid providers only run for selected brands/manual jobs"
+    : "";
+
+  const enoughReason = () =>
+    "skipped: enough good contacts already (" + usableCount + "/" + emailCap + ")";
+
+  if (providerGateReason) {
+    stageStatus.hunter = providerGateReason;
+    stageStatus.apollo = providerGateReason;
+    stageStatus.prospeo = providerGateReason;
+  } else {
+    if (usableCount < emailCap) {
+      hunterEmails = await discoverHunter(brandName, domain, emailCap - usableCount);
+      usableCount = await countUsableContacts(brandName, domain);
+      stageStatus.hunter = "completed (" + hunterEmails.length + " saved)";
+    } else {
+      stageStatus.hunter = enoughReason();
+    }
+
+    if (usableCount < emailCap) {
+      apolloEmails = await discoverApollo(brandName, domain, emailCap - usableCount);
+      usableCount = await countUsableContacts(brandName, domain);
+      stageStatus.apollo = "completed (" + apolloEmails.length + " saved)";
+    } else {
+      stageStatus.apollo = enoughReason();
+    }
+
+    if (usableCount < emailCap) {
+      prospeoEmails = await discoverProspeo(brandName, domain, emailCap - usableCount);
+      usableCount = await countUsableContacts(brandName, domain);
+      stageStatus.prospeo = "completed (" + prospeoEmails.length + " saved)";
+    } else {
+      stageStatus.prospeo = enoughReason();
+    }
+  }
 
   const allEmails = uniqueEmails([
     ...socialEmails,
@@ -999,7 +1346,18 @@ export async function discoverEmailsForBrandMap(brandMap: any) {
         foundVia: brandMap.foundVia || "",
         seedBrandId: brandMap.seedBrandId || null,
         brandMapId: brandMap._id,
-        status: allEmails.length > 0 ? "email_found" : "email_not_found"
+        status: allEmails.length > 0 ? "email_found" : "email_not_found",
+        // Discovered vs selected-for-outreach are different numbers: only up
+        // to MAX_EMAILS_PER_BRAND best contacts will ever be contacted.
+        discoveryStatus: {
+          ...stageStatus,
+          contactsDiscovered: allEmails.length,
+          contactsSelectedForOutreach: Math.min(usableCount, emailCap),
+          maxEmailsPerBrand: emailCap,
+          paidProvidersAllowed: allowPaidProviders,
+          checkedAt: new Date()
+        },
+        contactsSelected: Math.min(usableCount, emailCap)
       }
     },
     { upsert: true, new: true }
@@ -1032,11 +1390,25 @@ export async function discoverEmailsForBrandMap(brandMap: any) {
   };
 }
 
-export async function discoverEmailsForPendingBrands(seedBrandName?: string) {
+export async function discoverEmailsForPendingBrands(
+  seedBrandName?: string,
+  checkControl?: () => Promise<void>
+) {
   const query: Record<string, any> = {
     domain: { $exists: true, $nin: ["", "-", null, "N/A", "unspecified"] },
     isExcluded: { $ne: true }
   };
+
+  // Even when automatic discovery is deliberately enabled, it processes
+  // manually selected brands only unless EMAIL_DISCOVERY_SELECTED_ONLY is
+  // explicitly set to "false" (legacy process-everything behavior).
+  const selectedOnly =
+    String(process.env.EMAIL_DISCOVERY_SELECTED_ONLY || "true").toLowerCase() !==
+    "false";
+
+  if (selectedOnly) {
+    query.isSelected = true;
+  }
 
   if (seedBrandName) {
     query.foundVia = seedBrandName;
@@ -1051,8 +1423,50 @@ export async function discoverEmailsForPendingBrands(seedBrandName?: string) {
   const results: any[] = [];
 
   for (const brandMap of brandMaps as any[]) {
+    await checkControl?.();
+
     try {
       const result = await discoverEmailsForBrandMap(brandMap);
+      results.push(result);
+    } catch (error: any) {
+      await logError(
+        "Email Discovery",
+        brandMap.brandName + " - " + error.message,
+        error
+      );
+    }
+
+    await new Promise((resolve) => setTimeout(resolve, 1000));
+  }
+
+  return {
+    scanned: brandMaps.length,
+    processed: results.length,
+    results
+  };
+}
+
+export async function discoverEmailsForSelectedBrandMaps(brandMapIds: any[]) {
+  const ids = (Array.isArray(brandMapIds) ? brandMapIds : [])
+    .map((id) => String(id || "").trim())
+    .filter(Boolean);
+
+  if (ids.length === 0) {
+    return { scanned: 0, processed: 0, results: [] as any[] };
+  }
+
+  const brandMaps = await BrandMapModel.find({
+    _id: { $in: ids },
+    isExcluded: { $ne: true }
+  });
+
+  const results: any[] = [];
+
+  for (const brandMap of brandMaps as any[]) {
+    try {
+      const result = await discoverEmailsForBrandMap(brandMap, {
+        fromSelectedJob: true
+      });
       results.push(result);
     } catch (error: any) {
       await logError(

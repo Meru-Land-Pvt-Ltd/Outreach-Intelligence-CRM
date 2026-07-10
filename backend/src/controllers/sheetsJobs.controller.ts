@@ -23,8 +23,21 @@ function getLimit(value: any) {
   return Math.min(parsed, 5000);
 }
 
+function normalizeCrawlLimit(value: any) {
+  const parsed = Number(value);
+
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    return 0;
+  }
+
+  return Math.min(Math.floor(parsed), 5000);
+}
+
 function normalizeClosedDealPayload(body: any) {
   return {
+    crawlLimit: normalizeCrawlLimit(
+      body.crawlLimit ?? body.brandLimit ?? body.maxBrands
+    ),
     month: cleanText(body.month || body.Month),
     influencerHandle: cleanText(
       body.influencerHandle || body.influencer || body["Influencer Handle"]
@@ -358,13 +371,27 @@ export async function runIntelligenceJob(req: Request, res: Response) {
       });
     }
 
-    const seedBrand = await SeedBrand.findById(seedBrandId).lean();
+    let seedBrand = await SeedBrand.findById(seedBrandId).lean();
 
     if (!seedBrand) {
       return res.status(404).json({
         success: false,
         message: "Seed brand not found"
       });
+    }
+
+    const requestedCrawlLimit = normalizeCrawlLimit(
+      req.body?.crawlLimit ?? req.body?.brandLimit ?? req.body?.maxBrands
+    );
+
+    if (requestedCrawlLimit > 0 && requestedCrawlLimit !== Number(seedBrand.crawlLimit || 0)) {
+      await SeedBrand.findByIdAndUpdate(seedBrandId, {
+        $set: {
+          crawlLimit: requestedCrawlLimit
+        }
+      });
+
+      seedBrand = { ...seedBrand, crawlLimit: requestedCrawlLimit };
     }
 
     const existingActiveJobs = await intelligenceQueue.getJobs(
@@ -472,6 +499,7 @@ export async function runIntelligenceJob(req: Request, res: Response) {
           email: seedBrand.email || "",
           totalDealAmount: Number(seedBrand.totalDealAmount || 0),
           crawlCount: Number(seedBrand.crawlCount || 0),
+          crawlLimit: Number(seedBrand.crawlLimit || 0),
           status: "queued",
           currentStep: "QUEUED",
           progress: 0,

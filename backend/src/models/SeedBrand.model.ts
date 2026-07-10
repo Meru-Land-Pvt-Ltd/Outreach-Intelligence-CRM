@@ -54,6 +54,11 @@ const SeedBrandSchema = new mongoose.Schema(
       default: "pending"
     },
 
+    crawlLimit: {
+      type: Number,
+      default: 0
+    },
+
     raw: Object
   },
   {

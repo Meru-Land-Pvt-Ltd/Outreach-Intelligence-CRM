@@ -21,6 +21,9 @@ type InstantlyRow = {
   competitor2?: string;
   pushedStatus?: string;
   verificationStatus?: string;
+  niche?: string;
+  campaignSource?: string;
+  seedBrandName?: string;
   instantlyBounced?: string;
   instantlyBounceStatus?: string;
   bouncedStatus?: string;
@@ -59,29 +62,64 @@ function clean(value: unknown) {
   return text;
 }
 
+const NEGATIVE_BOUNCE_VALUES = [
+  "not bounced",
+  "not-bounced",
+  "no",
+  "false",
+  "0",
+  "none",
+  "safe",
+  "ok",
+];
+
 function getInstantlyBouncedStatus(row: InstantlyRow) {
-  const value =
-    clean(row.instantlyBounced) ||
-    clean(row.instantlyBounceStatus) ||
-    clean(row.bouncedStatus) ||
-    clean(row.bounceStatus) ||
-    clean(row.raw?.instantlyBounced) ||
-    clean(row.raw?.instantlyBounceStatus) ||
-    clean(row.raw?.bouncedStatus) ||
-    clean(row.raw?.bounceStatus);
+  const raw = row.raw || {};
 
-  if (value) return value;
+  const candidates = [
+    row.instantlyBounced,
+    row.instantlyBounceStatus,
+    row.bouncedStatus,
+    row.bounceStatus,
+    raw.instantlyBounced,
+    raw.instantlyBounceStatus,
+    raw.bouncedStatus,
+    raw.bounceStatus,
+  ];
 
-  if (row.isBounced || row.raw?.isBounced) {
-    const reason = clean(row.bounceReason || row.raw?.bounceReason);
-    return reason ? `Bounced - ${reason}` : "Bounced";
+  let bounced = false;
+  let reason = clean(row.bounceReason || raw.bounceReason);
+
+  for (const candidate of candidates) {
+    const value = clean(candidate);
+
+    if (!value) continue;
+
+    const lower = value.toLowerCase();
+
+    if (NEGATIVE_BOUNCE_VALUES.includes(lower)) continue;
+
+    if (lower.includes("bounce") || ["yes", "true", "1"].includes(lower)) {
+      bounced = true;
+
+      if (!reason) {
+        const embedded = value.match(/^bounced?\s*[-:]\s*(.+)$/i);
+        if (embedded) reason = embedded[1].trim();
+      }
+    }
   }
 
-  if (clean(row.bouncedAt || row.raw?.bouncedAt)) {
-    return "Bounced";
+  if (!bounced && (row.isBounced === true || raw.isBounced === true)) {
+    bounced = true;
   }
 
-  return "Not bounced";
+  if (!bounced && clean(row.bouncedAt || raw.bouncedAt || raw.instantlyBouncedAt)) {
+    bounced = true;
+  }
+
+  if (!bounced) return "Not bounced";
+
+  return reason ? `Bounced - ${reason}` : "Bounced";
 }
 
 function getClickableUrl(value?: string) {
@@ -150,6 +188,9 @@ function getSearchText(row: InstantlyRow) {
     row.competitor2,
     row.pushedStatus,
     row.verificationStatus,
+    row.niche,
+    row.campaignSource,
+    row.seedBrandName,
     getInstantlyBouncedStatus(row),
     row.gatewayBounced,
   ]
@@ -443,6 +484,28 @@ export default function MhdInstantlyPage() {
         header: "Product Name",
         widthClassName: "min-w-[260px]",
         render: (row) => clean(row.productName) || "-",
+      },
+      {
+        id: "nicheSource",
+        header: "Niche / Source",
+        widthClassName: "min-w-[180px]",
+        render: (row) => {
+          const niche = clean(row.niche);
+          const source = clean(row.campaignSource || row.seedBrandName);
+
+          if (!niche && !source) return <span className="text-slate-300">-</span>;
+
+          return (
+            <div className="space-y-0.5">
+              {niche ? (
+                <p className="text-sm font-medium text-slate-700">{niche}</p>
+              ) : null}
+              {source ? (
+                <p className="text-xs font-medium text-slate-500">via {source}</p>
+              ) : null}
+            </div>
+          );
+        },
       },
       {
         id: "relatedVideo",

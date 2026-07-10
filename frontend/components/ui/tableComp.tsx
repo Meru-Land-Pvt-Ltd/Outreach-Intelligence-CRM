@@ -95,13 +95,23 @@ export interface AdminTableProps<T> {
   pagination?: AdminTablePaginationConfig;
 
   onRowClick?: (row: T, rowId: string) => void;
-  rowClassName?: (row: T, index: number, isExpanded: boolean) => string;
+  rowClassName?: (
+    row: T,
+    index: number,
+    isExpanded: boolean
+  ) => string;
 
   className?: string;
   containerClassName?: string;
   tableClassName?: string;
   bodyClassName?: string;
   headerRowClassName?: string;
+
+  /**
+   * Controls the scrollable table area's height.
+   * You can override this from individual pages.
+   */
+  scrollAreaClassName?: string;
 }
 
 function SortHead({
@@ -128,17 +138,27 @@ function SortHead({
   return (
     <TableHead
       className={cx(
-        "py-4 text-xs font-bold uppercase tracking-[0.14em] text-slate-500",
+        "sticky top-0 z-20",
+        "border-r border-b border-slate-200 last:border-r-0",
+        "bg-slate-50",
+        "px-4 py-4",
+        "text-xs font-bold uppercase tracking-[0.14em] text-slate-600",
         getTextAlignClass(align),
-        sortable && "cursor-pointer select-none",
+        sortable && "cursor-pointer select-none hover:bg-slate-100",
         headerClassName
       )}
       onClick={sortable && onSort ? () => onSort(field) : undefined}
     >
-      <div className={cx("flex items-center gap-1", getJustifyClass(align))}>
+      <div
+        className={cx(
+          "flex items-center gap-1 whitespace-nowrap",
+          getJustifyClass(align)
+        )}
+      >
         {label}
+
         {isActive ? (
-          <span className="text-slate-500">
+          <span className="text-slate-600">
             {sortOrder === "asc" ? "↑" : "↓"}
           </span>
         ) : null}
@@ -157,9 +177,17 @@ function SkeletonRows({
   return (
     <>
       {Array.from({ length: rows }).map((_, rowIndex) => (
-        <TableRow key={rowIndex} className="border-slate-100">
+        <TableRow
+          key={rowIndex}
+          className="border-b border-slate-200 last:border-b-0"
+        >
           {Array.from({ length: colSpan }).map((__, cellIndex) => (
-            <TableCell key={cellIndex} className="py-4">
+            <TableCell
+              key={cellIndex}
+              className={cx(
+                "border-r border-slate-200 px-4 py-4 last:border-r-0"
+              )}
+            >
               <div className="h-4 w-full animate-pulse rounded-full bg-slate-100" />
             </TableCell>
           ))}
@@ -191,37 +219,64 @@ export default function AdminTable<T>({
   tableClassName,
   bodyClassName,
   headerRowClassName,
+  scrollAreaClassName = "max-h-[calc(100vh-260px)]",
 }: AdminTableProps<T>) {
   const hasExpandable = Boolean(expandable);
   const hasActions = Boolean(actions);
 
   const totalColumns =
-    columns.length + (hasExpandable ? 1 : 0) + (hasActions ? 1 : 0);
+    columns.length +
+    (hasExpandable ? 1 : 0) +
+    (hasActions ? 1 : 0);
 
   return (
-    <div className={cx("w-full", className)}>
+    <div
+      className={cx(
+        "flex min-h-0 w-full flex-col overflow-hidden",
+        className
+      )}
+    >
       {error ? (
-        <div className="mx-4 mt-4 rounded-2xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm font-semibold text-rose-700 md:mx-5">
+        <div className="mx-4 mt-4 shrink-0 rounded-2xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm font-semibold text-rose-700 md:mx-5">
           {error}
         </div>
       ) : null}
 
       <div
         className={cx(
-          "overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm",
+          "flex min-h-0 flex-1 flex-col overflow-hidden",
+          "rounded-xl border border-slate-200 bg-white shadow-sm",
           containerClassName
         )}
       >
-        <div className="overflow-x-auto">
-          <Table className={cx("border-collapse", tableClassName)}>
-            <TableHeader>
+        <div
+          className={cx(
+            "min-h-0 w-full overflow-auto overscroll-contain",
+            scrollAreaClassName
+          )}
+        >
+          <Table
+            className={cx(
+              "min-w-max border-separate border-spacing-0",
+              tableClassName
+            )}
+          >
+            <TableHeader className="sticky top-0 z-20 bg-slate-50">
               <TableRow
                 className={cx(
-                  "border-b border-slate-200 hover:bg-transparent",
+                  "border-0 hover:bg-transparent",
                   headerRowClassName
                 )}
               >
-                {hasExpandable ? <TableHead className="w-10 py-4" /> : null}
+                {hasExpandable ? (
+                  <TableHead
+                    className={cx(
+                      "sticky top-0 z-20 w-10",
+                      "border-r border-b border-slate-200",
+                      "bg-slate-50 px-4 py-4"
+                    )}
+                  />
+                ) : null}
 
                 {columns.map((column) => (
                   <SortHead
@@ -243,14 +298,17 @@ export default function AdminTable<T>({
                 {hasActions ? (
                   <TableHead
                     className={cx(
-                      "py-4 text-xs font-bold uppercase tracking-[0.14em] text-slate-500",
+                      "sticky top-0 z-20",
+                      "border-b border-l border-slate-200",
+                      "bg-slate-50 px-4 py-4",
+                      "text-xs font-bold uppercase tracking-[0.14em] text-slate-600",
                       getTextAlignClass(actions?.align || "right"),
                       actions?.headerClassName
                     )}
                   >
                     <div
                       className={cx(
-                        "flex items-center",
+                        "flex items-center whitespace-nowrap",
                         getJustifyClass(actions?.align || "right")
                       )}
                     >
@@ -263,13 +321,25 @@ export default function AdminTable<T>({
 
             <TableBody className={bodyClassName}>
               {loading ? (
-                <SkeletonRows rows={loadingRows} colSpan={totalColumns} />
+                <SkeletonRows
+                  rows={loadingRows}
+                  colSpan={totalColumns}
+                />
               ) : null}
 
               {!loading && data.length === 0 ? (
-                <TableRow>
-                  <TableCell colSpan={totalColumns} className="py-12 text-center">
+                <TableRow className="border-b border-slate-200">
+                  <TableCell
+                    colSpan={totalColumns}
+                    className="border-r-0 px-6 py-12 text-center"
+                  >
                     <div className="mx-auto max-w-md space-y-2">
+                      {emptyTitle ? (
+                        <p className="text-base font-semibold text-slate-800">
+                          {emptyTitle}
+                        </p>
+                      ) : null}
+
                       <p className="text-sm font-medium text-slate-500">
                         {emptyDescription}
                       </p>
@@ -281,22 +351,36 @@ export default function AdminTable<T>({
               {!loading &&
                 data.map((row, index) => {
                   const id = rowKey(row, index);
+
                   const canExpand = expandable?.canExpand
                     ? expandable.canExpand(row)
                     : Boolean(expandable);
-                  const isExpanded = canExpand && expandable?.expandedRowId === id;
-                  const isClickable = Boolean(onRowClick || (expandable && canExpand));
+
+                  const isExpanded =
+                    canExpand &&
+                    expandable?.expandedRowId === id;
+
+                  const isClickable = Boolean(
+                    onRowClick || (expandable && canExpand)
+                  );
 
                   return (
                     <React.Fragment key={id}>
                       <TableRow
                         className={cx(
-                          "border-b border-slate-100 transition last:border-b-0",
+                          "border-0 transition-colors",
+                          "[&>td]:border-b [&>td]:border-slate-200",
                           isClickable && "cursor-pointer",
                           isExpanded
                             ? "bg-slate-50"
-                            : isClickable && "hover:bg-slate-50/70",
-                          rowClassName?.(row, index, Boolean(isExpanded))
+                            : isClickable
+                              ? "hover:bg-slate-50/70"
+                              : "hover:bg-slate-50/40",
+                          rowClassName?.(
+                            row,
+                            index,
+                            Boolean(isExpanded)
+                          )
                         )}
                         onClick={() => {
                           if (onRowClick) {
@@ -310,7 +394,12 @@ export default function AdminTable<T>({
                         }}
                       >
                         {hasExpandable ? (
-                          <TableCell className="pl-4 pr-1">
+                          <TableCell
+                            className={cx(
+                              "border-r border-slate-200",
+                              "px-4 py-4"
+                            )}
+                          >
                             {canExpand ? (
                               isExpanded ? (
                                 <ChevronDown className="h-4 w-4 text-slate-500" />
@@ -325,7 +414,8 @@ export default function AdminTable<T>({
                           <TableCell
                             key={column.id}
                             className={cx(
-                              "py-4",
+                              "border-r border-slate-200",
+                              "px-4 py-4 last:border-r-0",
                               getTextAlignClass(column.align),
                               column.widthClassName,
                               column.cellClassName
@@ -338,11 +428,16 @@ export default function AdminTable<T>({
                         {hasActions ? (
                           <TableCell
                             className={cx(
-                              "py-4",
-                              getTextAlignClass(actions?.align || "right"),
+                              "border-l border-slate-200",
+                              "px-4 py-4",
+                              getTextAlignClass(
+                                actions?.align || "right"
+                              ),
                               actions?.cellClassName
                             )}
-                            onClick={(event) => event.stopPropagation()}
+                            onClick={(event) =>
+                              event.stopPropagation()
+                            }
                           >
                             {actions?.render(row, index)}
                           </TableCell>
@@ -350,17 +445,14 @@ export default function AdminTable<T>({
                       </TableRow>
 
                       {isExpanded && expandable ? (
-                        <TableRow
-                          className={cx(
-                            "border-b border-slate-100 bg-slate-50/70 last:border-b-0",
-                            expandable.expandedRowClassName
-                          )}
-                        >
+                        <TableRow className="border-0">
                           <TableCell
                             colSpan={totalColumns}
                             className={cx(
-                              "px-6 py-5",
-                              expandable.expandedCellClassName
+                              "border-b border-slate-200",
+                              "bg-slate-50/70 px-6 py-5",
+                              expandable.expandedCellClassName,
+                              expandable.expandedRowClassName
                             )}
                           >
                             {expandable.renderExpandedRow(row)}
@@ -376,19 +468,21 @@ export default function AdminTable<T>({
       </div>
 
       {pagination ? (
-        <Pagination
-          page={pagination.page}
-          totalPages={pagination.totalPages}
-          totalItems={pagination.totalItems}
-          limit={pagination.limit}
-          onPageChange={pagination.onPageChange}
-          onLimitChange={pagination.onLimitChange}
-          rowOptions={pagination.rowOptions}
-          loading={pagination.loading ?? loading}
-          className={pagination.className}
-          showRowsSelector={pagination.showRowsSelector}
-          showSummary={pagination.showSummary}
-        />
+        <div className="shrink-0">
+          <Pagination
+            page={pagination.page}
+            totalPages={pagination.totalPages}
+            totalItems={pagination.totalItems}
+            limit={pagination.limit}
+            onPageChange={pagination.onPageChange}
+            onLimitChange={pagination.onLimitChange}
+            rowOptions={pagination.rowOptions}
+            loading={pagination.loading ?? loading}
+            className={pagination.className}
+            showRowsSelector={pagination.showRowsSelector}
+            showSummary={pagination.showSummary}
+          />
+        </div>
       ) : null}
     </div>
   );

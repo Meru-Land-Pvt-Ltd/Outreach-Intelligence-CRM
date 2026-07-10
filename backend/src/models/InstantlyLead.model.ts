@@ -18,9 +18,15 @@ const InstantlyLeadSchema = new mongoose.Schema(
     competitor2: String,
 
     pushedStatus: String,
+    pushedAt: Date,
     verificationStatus: String,
     instantlyBounced: String,
     gatewayBounced: String,
+
+    niche: String,
+    campaignSource: String,
+    seedBrandName: String,
+    seedBrandId: mongoose.Schema.Types.ObjectId,
 
     brandMapId: mongoose.Schema.Types.ObjectId,
     contactId: mongoose.Schema.Types.ObjectId,

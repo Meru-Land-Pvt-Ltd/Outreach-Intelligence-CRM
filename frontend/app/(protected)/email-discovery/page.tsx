@@ -26,6 +26,15 @@ type EmailDiscoveryRow = {
   hunter?: string;
   apollo?: string;
   prospeo?: string;
+  discoveryStatus?: {
+    internalScrape?: string;
+    hunter?: string;
+    apollo?: string;
+    prospeo?: string;
+    contactsDiscovered?: number;
+    contactsSelectedForOutreach?: number;
+  };
+  contactsSelected?: number;
   createdAt?: string;
   updatedAt?: string;
 };
@@ -576,6 +585,41 @@ export default function EmailDiscoveryPage() {
   render: (row) => (
     <PlainMultilineCell value={displayEmailValue(row.prospeo)} />
   ),
+},
+{
+  id: "discoveryStatus",
+  header: "Discovery Status",
+  widthClassName: "min-w-[280px]",
+  render: (row) => {
+    const status = row.discoveryStatus;
+
+    if (!status || Object.keys(status).length === 0) {
+      return <span className="text-slate-300">-</span>;
+    }
+
+    const lines = [
+      status.internalScrape ? `Scrape: ${status.internalScrape}` : "",
+      status.hunter ? `Hunter: ${status.hunter}` : "",
+      status.apollo ? `Apollo: ${status.apollo}` : "",
+      status.prospeo ? `Prospeo: ${status.prospeo}` : "",
+      Number.isFinite(Number(status.contactsDiscovered))
+        ? `Discovered: ${status.contactsDiscovered}`
+        : "",
+      Number.isFinite(Number(status.contactsSelectedForOutreach))
+        ? `Selected for outreach: ${status.contactsSelectedForOutreach}`
+        : "",
+    ].filter(Boolean);
+
+    return (
+      <div className="space-y-0.5">
+        {lines.map((line, index) => (
+          <p key={index} className="text-xs font-medium text-slate-600">
+            {line}
+          </p>
+        ))}
+      </div>
+    );
+  },
 },
     ],
     []

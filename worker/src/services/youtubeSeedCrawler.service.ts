@@ -15,8 +15,25 @@ type CrawlInput = {
   seedBrandId: string;
   brandName: string;
   productName?: string;
+  crawlLimit?: number;
   checkControl?: () => Promise<void>;
 };
+
+// crawlLimit is the per-seed max discovered brands. The hard brand cap is
+// enforced in brandMap.service; here it bounds how many raw videos we crawl
+// so we stop spending YouTube quota once enough material is collected.
+export function getMaxVideosForRun(crawlLimit?: number) {
+  const limit = Math.max(0, Number(crawlLimit || 0));
+
+  if (!limit) return env.maxVideosPerSeed;
+
+  const factor = Math.max(
+    Number(process.env.CRAWL_VIDEOS_PER_BRAND_FACTOR || 30),
+    5
+  );
+
+  return Math.min(env.maxVideosPerSeed, Math.max(limit * factor, 200));
+}
 
 const GENERIC_PRODUCT_TOKENS = new Set([
   "max",
@@ -226,7 +243,11 @@ async function collectSeedInfluencerChannels(input: CrawlInput) {
   return Array.from(channelMap.values());
 }
 
-async function collectRecentVideosFromChannels(channels: any[], checkControl?: () => Promise<void>) {
+async function collectRecentVideosFromChannels(
+  channels: any[],
+  maxVideos: number,
+  checkControl?: () => Promise<void>
+) {
   const publishedAfter = getPublishedAfterDate();
   const videoIdToSource = new Map<string, any>();
 
@@ -262,7 +283,7 @@ async function collectRecentVideosFromChannels(channels: any[], checkControl?: (
           break;
         }
 
-        if (videoIdToSource.size >= env.maxVideosPerSeed) {
+        if (videoIdToSource.size >= maxVideos) {
           break;
         }
       }
@@ -271,7 +292,7 @@ async function collectRecentVideosFromChannels(channels: any[], checkControl?: (
       pagesFetched += 1;
 
       if (channelVideosFound >= env.maxVideosPerChannel) break;
-      if (videoIdToSource.size >= env.maxVideosPerSeed) break;
+      if (videoIdToSource.size >= maxVideos) break;
     } while (pageToken && pagesFetched < env.maxChannelPagesPerSeed);
 
     console.log("Finished influencer channel:", {
@@ -282,8 +303,8 @@ async function collectRecentVideosFromChannels(channels: any[], checkControl?: (
       totalVideosCollected: videoIdToSource.size
     });
 
-    if (videoIdToSource.size >= env.maxVideosPerSeed) {
-      console.log("Reached maxVideosPerSeed, stopping channel crawl:", env.maxVideosPerSeed);
+    if (videoIdToSource.size >= maxVideos) {
+      console.log("Reached max videos for this run, stopping channel crawl:", maxVideos);
       break;
     }
   }
@@ -295,7 +316,11 @@ export async function crawlSeedBrandYoutubeVideos(input: CrawlInput) {
   console.log("Seed brand:", input.brandName);
   console.log("Seed product:", input.productName || "");
 
+  const maxVideosForRun = getMaxVideosForRun(input.crawlLimit);
+
   console.log("Crawl limits:", {
+    crawlLimit: Number(input.crawlLimit || 0),
+    maxVideosForRun,
     maxVideosPerSeed: env.maxVideosPerSeed,
     maxChannelsPerSeed: env.maxChannelsPerSeed,
     maxVideosPerChannel: env.maxVideosPerChannel,
@@ -321,11 +346,15 @@ export async function crawlSeedBrandYoutubeVideos(input: CrawlInput) {
     };
   }
 
-  const videoIdToSource = await collectRecentVideosFromChannels(influencerChannels, input.checkControl);
+  const videoIdToSource = await collectRecentVideosFromChannels(
+    influencerChannels,
+    maxVideosForRun,
+    input.checkControl
+  );
 
   const videoIds = Array.from(videoIdToSource.keys()).slice(
     0,
-    env.maxVideosPerSeed
+    maxVideosForRun
   );
 
   if (videoIds.length === 0) {

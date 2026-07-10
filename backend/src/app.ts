@@ -12,6 +12,7 @@ import contactRoutes from "./routes/contact.routes";
 import sheetsRoutes from "./routes/sheets.routes";
 import sheetsJobsRoutes from "./routes/sheetsJobs.routes";
 import instantlyRoutes from "./routes/instantly.routes";
+import reportsRoutes from "./routes/reports.routes";
 
 export const app = express();
 
@@ -35,5 +36,6 @@ app.use("/api/contacts", contactRoutes);
 app.use("/api/sheets", sheetsRoutes);
 
 app.use("/api/instantly", instantlyRoutes);
+app.use("/api/reports", reportsRoutes);
 
 app.use("/api", sheetAlignedRoutes);

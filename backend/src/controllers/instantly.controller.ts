@@ -8,6 +8,12 @@ import { InstantlyTemplate } from "../models/InstantlyTemplate.model";
 import { InstantlyCampaign } from "../models/InstantlyCampaign.model";
 import { PushLog } from "../models/PushLog.model";
 import { BounceEvent } from "../models/BounceEvent.model";
+import { ExcludedBrand } from "../models/ExcludedBrand.model";
+import { buildExcludedBrandMatch } from "../utils/normalize";
+import {
+  getMaxEmailsPerBrand,
+  selectBestContactsForOutreach
+} from "../utils/contactRanking";
 
 const ContactModel = Contact as any;
 const BrandMapModel = BrandMap as any;
@@ -16,6 +22,7 @@ const InstantlyTemplateModel = InstantlyTemplate as any;
 const InstantlyCampaignModel = InstantlyCampaign as any;
 const PushLogModel = PushLog as any;
 const BounceEventModel = BounceEvent as any;
+const ExcludedBrandModel = ExcludedBrand as any;
 
 const INSTANTLY_EXPORT_JOB_TIMEOUT_MS = Number(
   process.env.INSTANTLY_EXPORT_JOB_TIMEOUT_MS || 30 * 60 * 1000
@@ -62,8 +69,24 @@ function isExportJobTimedOut(job: InstantlyExportJob) {
   return Date.now() - startedAt > INSTANTLY_EXPORT_JOB_TIMEOUT_MS;
 }
 
+const INSTANTLY_EXPORT_JOB_RETENTION_MS = Number(
+  process.env.INSTANTLY_EXPORT_JOB_RETENTION_MS || 6 * 60 * 60 * 1000
+);
+
 function markTimedOutExportJobs() {
+  const now = Date.now();
+
   for (const [jobId, job] of Object.entries(instantlyExportJobs)) {
+    if (job.status !== "running") {
+      const finishedAt = new Date(job.finishedAt || job.startedAt).getTime();
+
+      if (Number.isFinite(finishedAt) && now - finishedAt > INSTANTLY_EXPORT_JOB_RETENTION_MS) {
+        delete instantlyExportJobs[jobId];
+      }
+
+      continue;
+    }
+
     if (!isExportJobTimedOut(job)) continue;
 
     instantlyExportJobs[jobId] = {
@@ -74,6 +97,14 @@ function markTimedOutExportJobs() {
       error: "Export timed out before completion."
     };
   }
+}
+
+function findRunningExportJobId() {
+  for (const [jobId, job] of Object.entries(instantlyExportJobs)) {
+    if (job.status === "running") return jobId;
+  }
+
+  return null;
 }
 
 function updateExportJobProgress(jobId: string | undefined, patch: Partial<InstantlyExportJobProgress>, message?: string) {
@@ -173,46 +204,94 @@ const DEFAULT_TEMPLATES: Record<string, any> = {
 };
 
 
-function getInstantlyBouncedStatusForResponse(lead: any) {
-  const value =
-    cleanText(lead.instantlyBounced) ||
-    cleanText(lead.instantlyBounceStatus) ||
-    cleanText(lead.bouncedStatus) ||
-    cleanText(lead.bounceStatus) ||
-    cleanText(lead.raw?.instantlyBounced) ||
-    cleanText(lead.raw?.instantlyBounceStatus) ||
-    cleanText(lead.raw?.bouncedStatus) ||
-    cleanText(lead.raw?.bounceStatus);
+const NEGATIVE_BOUNCE_VALUES = [
+  "not bounced",
+  "not-bounced",
+  "no",
+  "false",
+  "0",
+  "-",
+  "none",
+  "safe",
+  "ok",
+  "n/a",
+  "na",
+  "null",
+  "undefined"
+];
 
-  if (value) return value;
+function isTruthyBounceFlag(value: any) {
+  if (value === true) return true;
 
-  if (lead.isBounced || lead.raw?.isBounced) {
-    const reason = cleanText(lead.bounceReason || lead.raw?.bounceReason);
-    return reason ? `Bounced - ${reason}` : "Bounced";
+  const lower = cleanText(value).toLowerCase();
+
+  return ["true", "yes", "1", "bounced"].includes(lower);
+}
+
+export function getInstantlyBouncedStatusForResponse(lead: any) {
+  const raw = lead?.raw || {};
+
+  const candidates = [
+    lead.instantlyBounced,
+    lead.instantlyBounceStatus,
+    lead.bouncedStatus,
+    lead.bounceStatus,
+    raw.instantlyBounced,
+    raw.instantlyBounceStatus,
+    raw.bouncedStatus,
+    raw.bounceStatus
+  ];
+
+  let bounced = false;
+  let reason = cleanText(lead.bounceReason || raw.bounceReason);
+
+  for (const candidate of candidates) {
+    const value = cleanText(candidate);
+
+    if (!value) continue;
+
+    const lower = value.toLowerCase();
+
+    if (NEGATIVE_BOUNCE_VALUES.includes(lower)) continue;
+
+    if (lower.includes("bounce") || ["yes", "true", "1"].includes(lower)) {
+      bounced = true;
+
+      if (!reason) {
+        const embedded = value.match(/^bounced?\s*[-:]\s*(.+)$/i);
+        if (embedded) reason = embedded[1].trim();
+      }
+    }
   }
 
-  if (cleanText(lead.bouncedAt || lead.raw?.bouncedAt)) {
-    return "Bounced";
+  if (!bounced && (isTruthyBounceFlag(lead.isBounced) || isTruthyBounceFlag(raw.isBounced))) {
+    bounced = true;
   }
 
-  return "Not bounced";
+  if (!bounced && cleanText(lead.bouncedAt || raw.bouncedAt || raw.instantlyBouncedAt)) {
+    bounced = true;
+  }
+
+  if (!bounced) return "Not bounced";
+
+  return reason ? `Bounced - ${reason}` : "Bounced";
 }
 
 function isInstantlyBouncedValue(value: any) {
   const lower = cleanText(value).toLowerCase();
 
   if (!lower) return false;
+  if (NEGATIVE_BOUNCE_VALUES.includes(lower)) return false;
 
-  return lower.includes("bounce");
+  return lower.includes("bounce") || ["yes", "true", "1"].includes(lower);
 }
 
-function getVerificationStatusForResponse(lead: any) {
+export function getVerificationStatusForResponse(lead: any) {
   const verificationStatus = cleanText(lead?.verificationStatus);
 
-  if (
-    verificationStatus.toLowerCase() === "bounced" &&
-    isInstantlyBouncedValue(getInstantlyBouncedStatusForResponse(lead))
-  ) {
+  // "bounced" is not a valid verification status; it leaks in from bounce
+  // syncs, so it is always shown as pending until re-verified.
+  if (verificationStatus.toLowerCase() === "bounced") {
     return "Pending Verification";
   }
 
@@ -994,6 +1073,26 @@ async function getEligibleLeads(input: {
   const leadIds: any[] = [];
   const checkedGateways: Record<string, string> = {};
 
+  // Never send more than MAX_EMAILS_PER_BRAND outreach emails per company on
+  // a channel, counting leads pushed by earlier campaigns.
+  const perCompanyCap = getMaxEmailsPerBrand();
+  const companyPushCounts: Record<string, number> = {};
+
+  const pushedAggregate: any[] = await InstantlyLeadModel.aggregate([
+    {
+      $match: {
+        channel: input.channel,
+        pushedStatus: { $exists: true, $nin: ["", null] },
+        companyName: { $exists: true, $nin: ["", null] }
+      }
+    },
+    { $group: { _id: { $toLower: "$companyName" }, count: { $sum: 1 } } }
+  ]);
+
+  for (const entry of pushedAggregate) {
+    companyPushCounts[String(entry._id || "")] = Number(entry.count || 0);
+  }
+
   for (const row of rows as any[]) {
     if (leadsToPush.length >= input.numLeads) break;
 
@@ -1001,6 +1100,12 @@ async function getEligibleLeads(input: {
 
     if (!email) continue;
     if (input.usedEmails && input.usedEmails[email]) continue;
+
+    const companyKey = cleanText(row.companyName).toLowerCase();
+
+    if (companyKey && (companyPushCounts[companyKey] || 0) >= perCompanyCap) {
+      continue;
+    }
 
     let verificationStatus = cleanText(row.verificationStatus);
 
@@ -1072,6 +1177,10 @@ async function getEligibleLeads(input: {
 
     leadsToPush.push(row);
     leadIds.push(row._id);
+
+    if (companyKey) {
+      companyPushCounts[companyKey] = (companyPushCounts[companyKey] || 0) + 1;
+    }
 
     if (input.usedEmails) {
       input.usedEmails[email] = true;
@@ -1176,6 +1285,7 @@ async function createAndPushCampaign(input: {
     await InstantlyLeadModel.findByIdAndUpdate(leadIds[i], {
       $set: {
         pushedStatus: pushedLabel,
+        pushedAt,
         campaignId
       }
     });
@@ -2223,13 +2333,20 @@ async function runInstantlyExportNow(input: { brandName?: string; jobId?: string
       `Preparing ${brandName} (${brandIndex + 1}/${brandMaps.length})...`
     );
 
-    const contacts = await ContactModel.find({
+    const allBrandContacts = await ContactModel.find({
       brandName,
       domain,
       email: { $exists: true, $nin: ["", null] },
       status: { $nin: ["invalid", "bounced", "skipped"] },
       verificationStatus: { $nin: ["Invalid", "invalid", "bounced", "Disposable", "disposable"] }
     }).sort({ createdAt: 1 });
+
+    // Enforce the per-brand outreach cap on the automatic prep-export path
+    // too: only the best MAX_EMAILS_PER_BRAND contacts are exported.
+    const contacts = selectBestContactsForOutreach(
+      allBrandContacts as any[],
+      getMaxEmailsPerBrand()
+    );
 
     const productName = getProductNameFromBrandMap(brandMap);
 
@@ -2350,20 +2467,279 @@ async function runInstantlyExportNow(input: { brandName?: string; jobId?: string
   };
 }
 
+const INSTANTLY_CHANNELS = ["Enoylity Technology", "MHD Tech"] as const;
+
+export async function exportBrandMapsToChannel(input: {
+  brandMapIds: any[];
+  channel: string;
+}) {
+  const channel = cleanText(input.channel);
+
+  if (!INSTANTLY_CHANNELS.includes(channel as any)) {
+    throw new Error('Invalid channel. Use "Enoylity Technology" or "MHD Tech".');
+  }
+
+  const ids = Array.isArray(input.brandMapIds)
+    ? input.brandMapIds.map(cleanText).filter(Boolean)
+    : [];
+
+  if (ids.length === 0) {
+    throw new Error("No Brand Map rows selected.");
+  }
+
+  const brandMaps = await BrandMapModel.find({ _id: { $in: ids } });
+  const cfg = getChannelConfig(channel);
+
+  let exported = 0;
+  let updatedExistingUnpushed = 0;
+  let skippedAlreadyPushed = 0;
+  let skippedInvalidVerification = 0;
+  let skippedExcludedBrands = 0;
+  let skippedIncompleteBrands = 0;
+  let brandsWithoutContacts = 0;
+  let processedContacts = 0;
+  const processedEmails = new Set<string>();
+  const perBrand: any[] = [];
+
+  const emailCap = getMaxEmailsPerBrand();
+  const crossBrandConflicts: any[] = [];
+
+  for (const brandMap of brandMaps as any[]) {
+    const brandName = cleanText(brandMap.brandName);
+    const domain = cleanText(brandMap.domain);
+
+    const excludeMatch = buildExcludedBrandMatch(brandName, domain);
+    const isInExcludeList = excludeMatch
+      ? Boolean(await ExcludedBrandModel.findOne(excludeMatch))
+      : false;
+
+    if (brandMap.isExcluded || isInExcludeList) {
+      skippedExcludedBrands += 1;
+      perBrand.push({ brandName, domain, skipped: true, reason: "excluded" });
+      continue;
+    }
+
+    if (!brandName || !domain) {
+      skippedIncompleteBrands += 1;
+      perBrand.push({
+        brandName,
+        domain,
+        skipped: true,
+        reason: "missing_name_or_domain"
+      });
+      continue;
+    }
+
+    const allContacts = await ContactModel.find({
+      brandName,
+      domain,
+      email: { $exists: true, $nin: ["", null] },
+      status: { $nin: ["invalid", "bounced", "skipped"] },
+      verificationStatus: {
+        $nin: ["Invalid", "invalid", "bounced", "Disposable", "disposable"]
+      }
+    }).sort({ createdAt: 1 });
+
+    if (allContacts.length === 0) {
+      brandsWithoutContacts += 1;
+    }
+
+    // Max 3-4 best contacts per brand: rank by verification, title relevance
+    // and seniority, then cap. Old contacts are never deleted — only the best
+    // ones are exported for outreach.
+    const contacts = selectBestContactsForOutreach(allContacts as any[], emailCap);
+
+    const productName = getProductNameFromBrandMap(brandMap);
+    const niche = cleanText(brandMap.niche);
+    const seedBrandName = cleanText(brandMap.seedBrandName || brandMap.foundVia);
+    const campaignSource = cleanText(brandMap.foundVia || brandMap.seedBrandName);
+
+    let brandExported = 0;
+    let brandUpdated = 0;
+    let brandSkipped = 0;
+
+    for (const contact of contacts as any[]) {
+      const email = cleanEmail(contact.email);
+
+      if (!email) continue;
+      if (processedEmails.has(email)) continue;
+      processedEmails.add(email);
+
+      processedContacts += 1;
+
+      const verificationStatus = normalizeVerificationStatusForStorage(
+        contact.verificationStatus || contact.status || "Pending Verification"
+      );
+
+      if (isVerificationRejected(verificationStatus)) {
+        skippedInvalidVerification += 1;
+        continue;
+      }
+
+      // Same channel + email may already belong to ANOTHER brand's row
+      // (unique channel+email model). Never silently overwrite it — report
+      // the conflict instead.
+      const existingLead = await InstantlyLeadModel.findOne({ channel, email })
+        .select("companyName pushedStatus")
+        .lean();
+
+      if (
+        existingLead &&
+        cleanText(existingLead.companyName) &&
+        cleanText(existingLead.companyName).toLowerCase() !== brandName.toLowerCase()
+      ) {
+        crossBrandConflicts.push({
+          email,
+          channel,
+          existingCompany: cleanText(existingLead.companyName),
+          requestedBrand: brandName,
+          existingAlreadyPushed: Boolean(cleanText(existingLead.pushedStatus))
+        });
+        brandSkipped += 1;
+        continue;
+      }
+
+      const upsertResult = await safeUpsertInstantlyLead({
+        channel,
+        firstName: getBetterFirstName(contact, brandName),
+        email,
+        companyName: brandName,
+        productName,
+        relatedVideo: cfg.relatedVideo,
+        competitor1: "",
+        competitor2: "",
+        pushedStatus: "",
+        verificationStatus,
+        instantlyBounced: "",
+        gatewayBounced: "Not Checked",
+        niche,
+        campaignSource,
+        seedBrandName,
+        seedBrandId: brandMap.seedBrandId || null,
+        brandMapId: brandMap._id,
+        contactId: contact._id,
+        raw: {
+          source: "manualBrandMapPush",
+          manualPushChannel: channel,
+          manualPushAt: new Date().toISOString()
+        }
+      });
+
+      if (upsertResult.skipped) {
+        skippedAlreadyPushed += 1;
+        brandSkipped += 1;
+        continue;
+      }
+
+      if (upsertResult.created) {
+        exported += 1;
+        brandExported += 1;
+      }
+
+      if (upsertResult.updated) {
+        updatedExistingUnpushed += 1;
+        brandUpdated += 1;
+      }
+    }
+
+    await BrandMapModel.updateOne(
+      { _id: brandMap._id },
+      {
+        $set: {
+          isSelected: true,
+          selectedAt: brandMap.selectedAt || new Date(),
+          "raw.lastManualPushChannel": channel,
+          "raw.lastManualPushAt": new Date()
+        }
+      }
+    );
+
+    perBrand.push({
+      brandName,
+      domain,
+      contactsFound: allContacts.length,
+      contactsSelected: contacts.length,
+      exported: brandExported,
+      updated: brandUpdated,
+      skippedAlreadyPushed: brandSkipped
+    });
+  }
+
+  return {
+    channel,
+    brandsRequested: ids.length,
+    brandsFound: brandMaps.length,
+    maxEmailsPerBrand: emailCap,
+    exported,
+    updatedExistingUnpushed,
+    skippedAlreadyPushed,
+    skippedInvalidVerification,
+    skippedExcludedBrands,
+    skippedIncompleteBrands,
+    brandsWithoutContacts,
+    processedContacts,
+    crossBrandConflicts,
+    perBrand
+  };
+}
+
 export async function exportInstantlyLeads(req: Request, res: Response) {
   try {
-    const result = await runInstantlyExportNow({
-      brandName: cleanText(req.body?.brandName)
+    const brandName = cleanText(req.body?.brandName);
+
+    markTimedOutExportJobs();
+
+    const runningJobId = findRunningExportJobId();
+
+    if (runningJobId) {
+      return res.status(202).json({
+        success: true,
+        status: "running",
+        jobId: runningJobId,
+        message: "An export is already running in background. Please wait for it to finish."
+      });
+    }
+
+    const jobId =
+      "export-" + Date.now().toString(36) + "-" + Math.random().toString(36).slice(2, 8);
+
+    instantlyExportJobs[jobId] = {
+      status: "running",
+      message: "Export started in background.",
+      startedAt: new Date().toISOString(),
+      progress: {}
+    };
+
+    setImmediate(async () => {
+      try {
+        const result = await runInstantlyExportNow({ brandName, jobId });
+        const { success: _resultSuccess, ...resultWithoutSuccess } = result;
+
+        instantlyExportJobs[jobId] = {
+          ...instantlyExportJobs[jobId],
+          status: "completed",
+          message: "Export complete. Clean Instantly leads are prepared.",
+          finishedAt: new Date().toISOString(),
+          result: resultWithoutSuccess
+        };
+      } catch (error: any) {
+        console.error("[Instantly Export Failed]", error);
+
+        instantlyExportJobs[jobId] = {
+          ...instantlyExportJobs[jobId],
+          status: "failed",
+          message: error?.message || "Export failed.",
+          finishedAt: new Date().toISOString(),
+          error: error?.message || String(error)
+        };
+      }
     });
 
-    const { success: _resultSuccess, ...resultWithoutSuccess } = result;
-
-    return res.json({
+    return res.status(202).json({
       success: true,
-      status: "completed",
-      message: "Export complete. Clean Instantly leads are prepared.",
-      result: resultWithoutSuccess,
-      ...resultWithoutSuccess
+      status: "running",
+      jobId,
+      message: "Export started in background. Please refresh after some time."
     });
   } catch (error: any) {
     console.error("[Instantly Export Failed]", error);
@@ -2377,6 +2753,150 @@ export async function exportInstantlyLeads(req: Request, res: Response) {
   }
 }
 
+// Resolve when a lead was pushed. Only explicit sources are trusted:
+// the pushedAt field, raw.pushedAt, or a date embedded in the pushed label
+// ("Pushed 2026-04-10 12:30 - Campaign"). Never falls back to updatedAt —
+// bounce syncs touch updatedAt and would make old pushes look recent.
+export function getPushedDateFromLead(lead: any) {
+  for (const explicit of [lead?.pushedAt, lead?.raw?.pushedAt]) {
+    if (!explicit) continue;
+
+    const date = new Date(explicit);
+
+    if (Number.isFinite(date.getTime()) && date.getTime() > 0) return date;
+  }
+
+  const match = cleanText(lead?.pushedStatus).match(
+    /(\d{4}-\d{2}-\d{2})(?:[ T](\d{2}:\d{2}))?/
+  );
+
+  if (match) {
+    const parsed = new Date(match[1] + "T" + (match[2] || "00:00") + ":00Z");
+
+    if (Number.isFinite(parsed.getTime())) return parsed;
+  }
+
+  return null;
+}
+
+export async function resetOldPushedLeads(req: Request, res: Response) {
+  try {
+    const monthsRaw = Number(req.body?.olderThanMonths ?? 3);
+    const olderThanMonths = Number.isFinite(monthsRaw) ? monthsRaw : 3;
+    const channel = cleanText(req.body?.channel);
+    const month = cleanText(req.body?.month); // optional "YYYY-MM"
+    const confirmed = req.body?.confirm === true;
+
+    if (olderThanMonths < 1) {
+      return res.status(400).json({
+        success: false,
+        message:
+          "olderThanMonths must be at least 1. Mass-clearing recent pushes is not allowed."
+      });
+    }
+
+    if (month && !/^\d{4}-\d{2}$/.test(month)) {
+      return res.status(400).json({
+        success: false,
+        message: 'month filter must use the "YYYY-MM" format'
+      });
+    }
+
+    const cutoff = new Date();
+    cutoff.setMonth(cutoff.getMonth() - olderThanMonths);
+
+    const filter: Record<string, any> = {
+      pushedStatus: { $exists: true, $nin: ["", null] }
+    };
+
+    if (channel) filter.channel = channel;
+
+    const candidates: any[] = await InstantlyLeadModel.find(filter)
+      .select("pushedStatus pushedAt channel raw.pushedAt")
+      .lean();
+
+    const toReset: any[] = [];
+    let unknownDateCount = 0;
+
+    for (const lead of candidates) {
+      const pushedDate = getPushedDateFromLead(lead);
+
+      if (pushedDate === null) {
+        // Never reset rows whose pushed date cannot be determined.
+        unknownDateCount += 1;
+        continue;
+      }
+
+      if (pushedDate >= cutoff) continue;
+
+      if (month && pushedDate.toISOString().substring(0, 7) !== month) continue;
+
+      toReset.push({ ...lead, resolvedPushedDate: pushedDate });
+    }
+
+    if (!confirmed) {
+      return res.json({
+        success: true,
+        dryRun: true,
+        matched: toReset.length,
+        unknownDateSkipped: unknownDateCount,
+        cutoff: cutoff.toISOString(),
+        monthFilter: month || null,
+        message:
+          toReset.length +
+          " lead(s) were pushed before " +
+          cutoff.toISOString().substring(0, 10) +
+          (month ? " in month " + month : "") +
+          " and would be reset. " +
+          unknownDateCount +
+          " lead(s) have no determinable pushed date and are never touched. " +
+          "Send confirm: true to apply."
+      });
+    }
+
+    let modified = 0;
+
+    for (const lead of toReset) {
+      await InstantlyLeadModel.updateOne(
+        { _id: lead._id },
+        {
+          $set: {
+            pushedStatus: "",
+            "raw.previousPushedStatus": lead.pushedStatus,
+            "raw.previousPushedAt": lead.resolvedPushedDate,
+            "raw.pushedStatusResetAt": new Date()
+          },
+          $unset: {
+            pushedAt: ""
+          }
+        }
+      );
+
+      modified += 1;
+    }
+
+    return res.json({
+      success: true,
+      dryRun: false,
+      matched: toReset.length,
+      modified,
+      unknownDateSkipped: unknownDateCount,
+      cutoff: cutoff.toISOString(),
+      monthFilter: month || null,
+      message:
+        modified +
+        " lead(s) had pushed status reset and are eligible for outreach again. " +
+        unknownDateCount +
+        " lead(s) with unknown pushed date were left untouched."
+    });
+  } catch (error: any) {
+    res.status(500).json({
+      success: false,
+      message: error.message || "Failed to reset pushed leads"
+    });
+  }
+}
+
 export async function getInstantlyExportStatus(req: Request, res: Response) {
   markTimedOutExportJobs();
 
@@ -2384,9 +2904,12 @@ export async function getInstantlyExportStatus(req: Request, res: Response) {
   const job = instantlyExportJobs[jobId];
 
   if (!job) {
-    return res.status(404).json({
-      success: false,
-      message: "Export job not found."
+    return res.json({
+      success: true,
+      jobId,
+      status: "unknown",
+      message:
+        "Export job not found. It may have finished earlier or the server restarted. Please refresh the page."
     });
   }
 
