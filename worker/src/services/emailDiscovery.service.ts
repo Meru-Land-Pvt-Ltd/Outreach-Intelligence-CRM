@@ -9,6 +9,7 @@ import { ProspeoRawContact } from "../models/ProspeoRawContact.model";
 import { PipelineTracker } from "../models/PipelineTracker.model";
 import { logDone, logError } from "./runLog.service";
 import { searchProspeoContacts } from "./prospeo.service";
+import { getAppSettings } from "./appSettings.service";
 
 const BrandMapModel = BrandMap as any;
 const ContactModel = Contact as any;
@@ -902,7 +903,18 @@ async function discoverProspeo(brandName: string, domain: string) {
   }
 }
 
-export async function discoverEmailsForBrandMap(brandMap: any) {
+function parseEmailsFromCell(cell: any) {
+  return String(cell || "")
+    .split(/\n+/)
+    .map((line) => line.trim())
+    .filter((line) => line.includes("@") && !line.startsWith("("));
+}
+
+export async function discoverEmailsForBrandMap(
+  brandMap: any,
+  options: { mode?: "full" | "scrape_only" } = {}
+) {
+  const mode = options.mode === "scrape_only" ? "scrape_only" : "full";
   const brandName = cleanText(brandMap.brandName);
   const domain = normalizeDomain(brandMap.domain);
 
@@ -917,7 +929,8 @@ export async function discoverEmailsForBrandMap(brandMap: any) {
 
   const existing = await EmailDiscoveryModel.findOne({ brandName, domain });
 
-  if (existing?.totalEmails) {
+  // A manual scrape is an explicit refresh; only full runs short-circuit.
+  if (mode === "full" && existing?.totalEmails) {
     const shouldRefreshMissingProspeo =
       process.env.PROSPEO_REFRESH_MISSING !== "false" &&
       !hasRealEmailCell(existing.prospeo) &&
@@ -959,9 +972,115 @@ export async function discoverEmailsForBrandMap(brandMap: any) {
     });
   }
 
-  const hunterEmails = await discoverHunter(brandName, domain);
-  const apolloEmails = await discoverApollo(brandName, domain);
-  const prospeoEmails = await discoverProspeo(brandName, domain);
+  if (mode === "scrape_only") {
+    // Refresh only the scrape-owned cells; provider cells stay untouched.
+    const knownEmails = uniqueEmails([
+      ...socialEmails,
+      ...parseEmailsFromCell(existing?.hunter),
+      ...parseEmailsFromCell(existing?.apollo),
+      ...parseEmailsFromCell(existing?.prospeo)
+    ]);
+
+    await EmailDiscoveryModel.findOneAndUpdate(
+      { brandName, domain },
+      {
+        $set: {
+          brandName,
+          domain,
+
+          instagram: formatSourceCell(social.instagram),
+          twitter: formatSourceCell(social.twitter),
+          facebook: formatSourceCell(social.facebook),
+          linkedin: formatSourceCell(social.linkedin),
+          youtube: formatSourceCell(social.youtube),
+          website: formatSourceCell(social.website),
+
+          totalEmails:
+            knownEmails.length > 0 ? knownEmails.join("\n") : "(No emails found)",
+
+          discoveryMode: "scrape_only",
+          scrapeEmailCount: socialEmails.length,
+          scrapeCheckedAt: new Date(),
+
+          foundVia: brandMap.foundVia || existing?.foundVia || "",
+          seedBrandId: brandMap.seedBrandId || null,
+          brandMapId: brandMap._id,
+          status: knownEmails.length > 0 ? "email_found" : "email_not_found"
+        }
+      },
+      { upsert: true, new: true }
+    );
+
+    await BrandMapModel.findByIdAndUpdate(brandMap._id, {
+      $set: {
+        status: knownEmails.length > 0 ? "email_found" : "email_not_found"
+      }
+    });
+
+    await PipelineTrackerModel.create({
+      type: "Discovered",
+      brandName,
+      domain,
+      status:
+        "Web Scrape - " + socialEmails.length + " emails (no paid credits used)",
+      timestamp: new Date()
+    });
+
+    await logDone(
+      "Web Scrape",
+      brandName + " - " + socialEmails.length + " emails"
+    );
+
+    return {
+      brandName,
+      domain,
+      status: socialEmails.length > 0 ? "email_found" : "email_not_found",
+      saved: socialEmails.length,
+      mode: "scrape_only"
+    };
+  }
+
+  // Scrape-first cascade: each paid provider only fires while the collected
+  // pool is still below the threshold, so credits are spent as a fallback.
+  const settings = await getAppSettings();
+  const skipPaid = settings.scrapeFirstSkipPaid;
+  const neededEmails = Math.max(
+    settings.scrapeSkipThreshold,
+    settings.maxEmailsPerBrand
+  );
+
+  const providersSkipped: string[] = [];
+  let collected = [...socialEmails];
+
+  let hunterEmails: string[] = [];
+
+  if (skipPaid && collected.length >= neededEmails) {
+    providersSkipped.push("hunter");
+  } else {
+    hunterEmails = await discoverHunter(brandName, domain);
+    collected = uniqueEmails([...collected, ...hunterEmails]);
+  }
+
+  let apolloEmails: string[] = [];
+
+  if (skipPaid && collected.length >= neededEmails) {
+    providersSkipped.push("apollo");
+  } else {
+    apolloEmails = await discoverApollo(brandName, domain);
+    collected = uniqueEmails([...collected, ...apolloEmails]);
+  }
+
+  let prospeoEmails: string[] = [];
+
+  if (skipPaid && collected.length >= neededEmails) {
+    providersSkipped.push("prospeo");
+  } else {
+    prospeoEmails = await discoverProspeo(brandName, domain);
+    collected = uniqueEmails([...collected, ...prospeoEmails]);
+  }
+
+  const skippedCellText =
+    "(Skipped — scrape found " + socialEmails.length + " emails)";
 
   const allEmails = uniqueEmails([
     ...socialEmails,
@@ -988,13 +1107,30 @@ export async function discoverEmailsForBrandMap(brandMap: any) {
           allEmails.length > 0 ? allEmails.join("\n") : "(No emails found)",
 
         hunter:
-          hunterEmails.length > 0 ? hunterEmails.join("\n") : "(No Hunter emails found)",
+          hunterEmails.length > 0
+            ? hunterEmails.join("\n")
+            : providersSkipped.includes("hunter")
+              ? skippedCellText
+              : "(No Hunter emails found)",
         apollo:
-          apolloEmails.length > 0 ? apolloEmails.join("\n") : "(No Apollo emails found)",
+          apolloEmails.length > 0
+            ? apolloEmails.join("\n")
+            : providersSkipped.includes("apollo")
+              ? skippedCellText
+              : "(No Apollo emails found)",
         prospeo:
-          prospeoEmails.length > 0 ? prospeoEmails.join("\n") : "(No Prospeo emails found)",
+          prospeoEmails.length > 0
+            ? prospeoEmails.join("\n")
+            : providersSkipped.includes("prospeo")
+              ? skippedCellText
+              : "(No Prospeo emails found)",
         prospeoCheckedAt: new Date(),
         prospeoAllCheckedAt: process.env.PROSPEO_ONLY_VERIFIED_EMAIL === "true" ? null : new Date(),
+
+        discoveryMode: skipPaid ? "scrape_first" : "full",
+        providersSkipped,
+        scrapeEmailCount: socialEmails.length,
+        scrapeCheckedAt: new Date(),
 
         foundVia: brandMap.foundVia || "",
         seedBrandId: brandMap.seedBrandId || null,
@@ -1021,22 +1157,37 @@ export async function discoverEmailsForBrandMap(brandMap: any) {
 
   await logDone(
     "Email Discovery",
-    brandName + " - " + allEmails.length + " emails"
+    brandName +
+      " - " +
+      allEmails.length +
+      " emails" +
+      (providersSkipped.length
+        ? " (skipped: " + providersSkipped.join(", ") + ")"
+        : "")
   );
 
   return {
     brandName,
     domain,
     status: allEmails.length > 0 ? "email_found" : "email_not_found",
-    saved: allEmails.length
+    saved: allEmails.length,
+    providersSkipped
   };
 }
 
 export async function discoverEmailsForPendingBrands(seedBrandName?: string) {
+  const settings = await getAppSettings();
+
   const query: Record<string, any> = {
     domain: { $exists: true, $nin: ["", "-", null, "N/A", "unspecified"] },
     isExcluded: { $ne: true }
   };
+
+  // Defense in depth: in manual mode only approved brands are discoverable,
+  // even if this stage is somehow reached outside the selected-brands job.
+  if (settings.manualSelectionMode) {
+    query.selectionStatus = "approved";
+  }
 
   if (seedBrandName) {
     query.foundVia = seedBrandName;

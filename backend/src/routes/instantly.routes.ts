@@ -12,9 +12,9 @@ import {
   getSenders,
   getTemplatePreview,
   getTemplates,
-  instantlyWebhook,
   pullBouncedFromInstantly,
   pushToInstantly,
+  releasePushedLeads,
   saveTemplate,
   verifyPendingInstantlyLeads
 } from "../controllers/instantly.controller";
@@ -54,6 +54,8 @@ router.post("/pull-bounced", pullBouncedFromInstantly);
 
 router.post("/bounces/pull", pullBouncedFromInstantly);
 
-router.post("/webhook", instantlyWebhook);
+router.post("/release-pushed", releasePushedLeads);
+
+// The webhook is registered directly in app.ts, before the auth gate.
 
 export default router;

@@ -1,10 +1,75 @@
 import { Contact } from "../models/Contact.model";
 import { BrandMap } from "../models/BrandMap.model";
 import { InstantlyLead } from "../models/InstantlyLead.model";
+import { getAppSettings } from "./appSettings.service";
 
 const ContactModel = Contact as any;
 const BrandMapModel = BrandMap as any;
 const InstantlyLeadModel = InstantlyLead as any;
+
+const ROLE_TIER_PATTERNS: Array<{ tier: number; pattern: RegExp }> = [
+  {
+    tier: 1,
+    pattern: /founder|co-?founder|ceo|chief executive|owner|president/i
+  },
+  {
+    tier: 2,
+    pattern:
+      /cmo|marketing|partnership|collab|influencer|brand|public relations|\bpr\b|growth|social media/i
+  },
+  {
+    tier: 3,
+    pattern: /sales|business development|\bbd\b|bizdev|account/i
+  }
+];
+
+const GENERIC_MAILBOX_REGEX =
+  /^(info|hello|contact|contactus|support|team|admin|office|mail|enquiries|inquiries|sales|marketing|media|press|partnerships?)@/i;
+
+// Pick the best N contacts of a brand: verified first, then by role priority
+// (decision makers > marketing/partnerships > sales > generic mailboxes >
+// unknown roles), then oldest first. Used to cap outreach per brand.
+export function selectTopContacts(contacts: any[], cap: number) {
+  if (!Number.isFinite(cap) || cap <= 0 || contacts.length <= cap) {
+    return contacts;
+  }
+
+  const scored = contacts.map((contact: any, index: number) => {
+    const email = cleanEmail(contact.email);
+    const roleText =
+      cleanText(contact.designation || contact.role) +
+      " " +
+      email.split("@")[0];
+
+    let tier = 5;
+
+    for (const { tier: candidateTier, pattern } of ROLE_TIER_PATTERNS) {
+      if (pattern.test(roleText)) {
+        tier = candidateTier;
+        break;
+      }
+    }
+
+    if (tier === 5 && GENERIC_MAILBOX_REGEX.test(email)) {
+      tier = 4;
+    }
+
+    const verifiedRank =
+      cleanText(contact.verificationStatus) === "Ok" ||
+      cleanText(contact.status) === "verified"
+        ? 0
+        : 1;
+
+    return { contact, verifiedRank, tier, index };
+  });
+
+  scored.sort(
+    (a, b) =>
+      a.verifiedRank - b.verifiedRank || a.tier - b.tier || a.index - b.index
+  );
+
+  return scored.slice(0, cap).map((item) => item.contact);
+}
 
 const ENOYLITY_RELATED_FALLBACK =
   "https://www.youtube.com/watch?v=epYZxWOC_KE&list=PL4Bx6jiikXaWgZvxXTDvM3WNwClh690-E&index=1";
@@ -381,7 +446,7 @@ export async function exportBrandToInstantlyTabs(brandName: string) {
     };
   }
 
-  const contacts = await ContactModel.find({
+  const allContacts = await ContactModel.find({
     brandName,
     domain,
     email: {
@@ -397,6 +462,9 @@ export async function exportBrandToInstantlyTabs(brandName: string) {
   }).sort({
     createdAt: 1
   });
+
+  const settings = await getAppSettings();
+  const contacts = selectTopContacts(allContacts, settings.maxEmailsPerBrand);
 
   const productName = getProductNameFromBrandMap(brandMap);
 

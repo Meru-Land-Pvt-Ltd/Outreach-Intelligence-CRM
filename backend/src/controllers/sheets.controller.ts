@@ -2,8 +2,88 @@ import { Request, Response } from "express";
 import { ClosedDeal } from "../models/ClosedDeal.model";
 import { SeedBrand } from "../models/SeedBrand.model";
 import { ExcludedBrand } from "../models/ExcludedBrand.model";
+import { BrandMap } from "../models/BrandMap.model";
 import { PipelineTracker } from "../models/PipelineTracker.model";
 import { NicheAnalysis } from "../models/NicheAnalysis.model";
+import {
+  cleanText,
+  escapeRegex,
+  normalizeBrandName,
+  normalizeDomain
+} from "../utils/normalize";
+
+export async function markBrandMapExcluded(brandName: string, domain: string) {
+  const conditions: any[] = [];
+
+  if (brandName) {
+    conditions.push({
+      brandName: new RegExp("^" + escapeRegex(brandName) + "$", "i")
+    });
+  }
+
+  if (domain) {
+    conditions.push({
+      domain: new RegExp("^" + escapeRegex(domain) + "$", "i")
+    });
+    conditions.push({
+      domain: new RegExp("^www\\." + escapeRegex(domain) + "$", "i")
+    });
+  }
+
+  if (conditions.length === 0) {
+    return 0;
+  }
+
+  const result = await (BrandMap as any).updateMany(
+    { $or: conditions },
+    {
+      $set: {
+        isExcluded: true,
+        status: "excluded",
+        selectionStatus: "excluded",
+        selectionUpdatedAt: new Date()
+      }
+    }
+  );
+
+  return Number(result?.modifiedCount || 0);
+}
+
+export async function upsertExcludedBrand(input: {
+  brandName: string;
+  domain: string;
+  source: string;
+}) {
+  const brandName = cleanText(input.brandName);
+  const domain = normalizeDomain(input.domain);
+  const normalizedBrandName = normalizeBrandName(brandName || domain);
+
+  if (!normalizedBrandName) {
+    return null;
+  }
+
+  return (ExcludedBrand as any).findOneAndUpdate(
+    {
+      normalizedBrandName,
+      normalizedDomain: domain
+    },
+    {
+      $set: {
+        brandName: brandName || domain,
+        domain
+      },
+      $setOnInsert: {
+        normalizedBrandName,
+        normalizedDomain: domain,
+        source: input.source
+      }
+    },
+    {
+      upsert: true,
+      new: true
+    }
+  );
+}
 
 export async function getClosedDeals(req: Request, res: Response) {
   try {
@@ -99,14 +179,29 @@ export async function createExcludedBrand(req: Request, res: Response) {
       });
     }
 
-    const data = await ExcludedBrand.create({
-      brandName: brandName || "",
-      domain: domain || ""
+    const data = await upsertExcludedBrand({
+      brandName: String(brandName || ""),
+      domain: String(domain || ""),
+      source: "manual"
     });
+
+    if (!data) {
+      return res.status(400).json({
+        success: false,
+        message: "Brand Name or Domain is required"
+      });
+    }
+
+    // Also flag matching Brand Map rows so they drop out of the pipeline.
+    const brandMapsExcluded = await markBrandMapExcluded(
+      cleanText(brandName),
+      normalizeDomain(domain)
+    );
 
     res.json({
       success: true,
-      data
+      data,
+      brandMapsExcluded
     });
   } catch (error: any) {
     res.status(500).json({ success: false, message: error.message });

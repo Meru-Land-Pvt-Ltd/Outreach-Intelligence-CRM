@@ -1,6 +1,12 @@
 import { Request, Response } from "express";
+import mongoose from "mongoose";
 import { BrandMap } from "../models/BrandMap.model";
 import { RawYoutubeVideo } from "../models/RawYoutubeVideo.model";
+import { JobLog } from "../models/JobLog.model";
+import { intelligenceQueue } from "../queues/intelligence.queue";
+import { upsertExcludedBrand } from "./sheets.controller";
+import { getAppSettings } from "./settings.controller";
+import { callOpenAIWithWebSearch } from "../utils/openaiResponses";
 
 function cleanValue(value: any) {
   return String(value || "").trim();
@@ -270,6 +276,627 @@ export async function rebuildAllBrandMaps(req: Request, res: Response) {
       success: true,
       count: results.length,
       data: results
+    });
+  } catch (error: any) {
+    res.status(500).json({
+      success: false,
+      message: error.message
+    });
+  }
+}
+
+export async function bulkSelectBrands(req: Request, res: Response) {
+  try {
+    const action = String(req.body?.action || "").toLowerCase();
+    const force = Boolean(req.body?.force);
+
+    const ids: string[] = (Array.isArray(req.body?.ids) ? req.body.ids : [])
+      .map((id: any) => String(id))
+      .filter((id: string) => mongoose.Types.ObjectId.isValid(id));
+
+    if (!["approve", "exclude", "reset"].includes(action)) {
+      return res.status(400).json({
+        success: false,
+        message: "action must be approve, exclude or reset"
+      });
+    }
+
+    if (ids.length === 0) {
+      return res.status(400).json({
+        success: false,
+        message: "ids is required"
+      });
+    }
+
+    if (ids.length > 500) {
+      return res.status(400).json({
+        success: false,
+        message: "Too many ids in one request (max 500)."
+      });
+    }
+
+    const updatedBy = String((req as any).user?.email || "");
+    const now = new Date();
+
+    const rows = await BrandMap.find({ _id: { $in: ids } }).lean();
+
+    if (action === "approve") {
+      // Excluded brands stay excluded unless explicitly forced, so a stray
+      // select-all cannot resurrect trashed brands.
+      const eligible = rows.filter(
+        (row: any) => force || row.selectionStatus !== "excluded"
+      );
+      const rejectedExcluded = rows
+        .filter((row: any) => !force && row.selectionStatus === "excluded")
+        .map((row: any) => String(row._id));
+
+      await BrandMap.updateMany(
+        { _id: { $in: eligible.map((row: any) => row._id) } },
+        {
+          $set: {
+            selectionStatus: "approved",
+            isExcluded: false,
+            selectionUpdatedAt: now,
+            selectionUpdatedBy: updatedBy
+          }
+        }
+      );
+
+      return res.json({
+        success: true,
+        action,
+        updated: eligible.length,
+        rejectedExcluded
+      });
+    }
+
+    if (action === "exclude") {
+      let excludedListUpserts = 0;
+
+      // The ExcludedBrand rows are what keep these brands out of future
+      // crawls; the BrandMap flags remove them from the current pipeline.
+      for (const row of rows as any[]) {
+        const upserted = await upsertExcludedBrand({
+          brandName: String(row.brandName || ""),
+          domain: String(row.domain || ""),
+          source: "brand_map_bulk"
+        });
+
+        if (upserted) {
+          excludedListUpserts += 1;
+        }
+      }
+
+      await BrandMap.updateMany(
+        { _id: { $in: rows.map((row: any) => row._id) } },
+        {
+          $set: {
+            selectionStatus: "excluded",
+            isExcluded: true,
+            status: "excluded",
+            selectionUpdatedAt: now,
+            selectionUpdatedBy: updatedBy
+          }
+        }
+      );
+
+      return res.json({
+        success: true,
+        action,
+        updated: rows.length,
+        excludedListUpserts
+      });
+    }
+
+    // reset: back to pending for this map only. The global exclude list is
+    // managed on the Excluded Brands page and is deliberately not touched.
+    await BrandMap.updateMany(
+      { _id: { $in: ids } },
+      {
+        $set: {
+          selectionStatus: "pending",
+          isExcluded: false,
+          selectionUpdatedAt: now,
+          selectionUpdatedBy: updatedBy
+        }
+      }
+    );
+
+    await BrandMap.updateMany(
+      { _id: { $in: ids }, status: "excluded" },
+      {
+        $set: {
+          status: "domain_found"
+        }
+      }
+    );
+
+    return res.json({
+      success: true,
+      action,
+      updated: ids.length
+    });
+  } catch (error: any) {
+    res.status(500).json({
+      success: false,
+      message: error.message
+    });
+  }
+}
+
+// "Send Selected to Campaign": approve the picked brands and queue the worker
+// job that runs discovery → verification → Instantly staging for them only.
+export async function processSelectedBrands(req: Request, res: Response) {
+  try {
+    const ids: string[] = (
+      Array.isArray(req.body?.brandMapIds) ? req.body.brandMapIds : []
+    )
+      .map((id: any) => String(id))
+      .filter((id: string) => mongoose.Types.ObjectId.isValid(id));
+
+    if (ids.length === 0) {
+      return res.status(400).json({
+        success: false,
+        message: "brandMapIds is required"
+      });
+    }
+
+    if (ids.length > 200) {
+      return res.status(400).json({
+        success: false,
+        message: "Too many brands in one request (max 200)."
+      });
+    }
+
+    const requestedBy = String((req as any).user?.email || "");
+    const now = new Date();
+
+    const rows = await BrandMap.find({ _id: { $in: ids } }).lean();
+
+    const eligible = rows.filter(
+      (row: any) => row.selectionStatus !== "excluded" && row.isExcluded !== true
+    );
+    const rejected = rows
+      .filter(
+        (row: any) =>
+          row.selectionStatus === "excluded" || row.isExcluded === true
+      )
+      .map((row: any) => String(row._id));
+
+    if (eligible.length === 0) {
+      return res.status(400).json({
+        success: false,
+        message: "All selected brands are excluded.",
+        rejected
+      });
+    }
+
+    const eligibleIds = eligible.map((row: any) => String(row._id));
+
+    await BrandMap.updateMany(
+      { _id: { $in: eligibleIds } },
+      {
+        $set: {
+          selectionStatus: "approved",
+          isExcluded: false,
+          selectionUpdatedAt: now,
+          selectionUpdatedBy: requestedBy
+        }
+      }
+    );
+
+    const job = await intelligenceQueue.add(
+      "process-selected-brands",
+      {
+        brandMapIds: eligibleIds,
+        requestedBy
+      },
+      {
+        attempts: 1,
+        removeOnComplete: false,
+        removeOnFail: false
+      }
+    );
+
+    await JobLog.findOneAndUpdate(
+      { jobId: String(job.id) },
+      {
+        $set: {
+          jobId: String(job.id),
+          type: "intelligence",
+          brandName: `Selected brands (${eligibleIds.length})`,
+          status: "queued",
+          currentStep: "QUEUED",
+          progress: 0,
+          totalFound: eligibleIds.length,
+          message: "Selected-brands processing queued",
+          startedAt: now,
+          raw: {
+            kind: "process-selected",
+            brandMapIds: eligibleIds,
+            requestedBy
+          }
+        }
+      },
+      { upsert: true, returnDocument: "after" }
+    );
+
+    res.status(201).json({
+      success: true,
+      jobId: String(job.id),
+      queued: eligibleIds.length,
+      rejected
+    });
+  } catch (error: any) {
+    res.status(500).json({
+      success: false,
+      message: error.message
+    });
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Intent discovery: on-demand AI scan of a brand's recent public activity,
+// scored 0-100 for how likely the brand is to buy influencer outreach now.
+// Never runs automatically — button/bulk only, so web-search cost is bounded.
+// ---------------------------------------------------------------------------
+
+function buildIntentPrompt(brandMap: any, lookbackDays: number) {
+  const brandName = cleanValue(brandMap.brandName);
+  const domain = cleanValue(brandMap.domain);
+  const niche = cleanValue(brandMap.niche);
+
+  return [
+    'You are a B2B outreach analyst. Search the public web for activity by the brand "' +
+      brandName +
+      '"' +
+      (domain ? " (website: " + domain + ")" : "") +
+      (niche ? " in the " + niche + " niche" : "") +
+      " within the last " +
+      lookbackDays +
+      " days.",
+    "",
+    "Score 0-100 = probability this brand would buy YouTube influencer-marketing outreach right now. Weight:",
+    "+35 active creator/influencer collaborations, sponsorships, UGC or affiliate programs in the window",
+    "+25 product launch, funding round, or major promo/seasonal campaign in the window",
+    "+15 hiring for marketing/partnerships/social-media roles",
+    "+15 niche momentum: press coverage, social growth, entering new markets",
+    "-10 negative signals: layoffs, shutdown or pivot rumors, legal trouble, statements that they do not do sponsorships",
+    "",
+    "Return STRICT JSON only, no prose before or after:",
+    '{"score": <integer 0-100>, "summary": "<2-3 sentences>", "signals": [{"date": "YYYY-MM-DD", "signal": "<what happened>", "source": "<source domain>"}]}'
+  ].join("\n");
+}
+
+function parseIntentJson(text: string) {
+  const cleaned = String(text || "")
+    .replace(/```json/gi, "")
+    .replace(/```/g, "")
+    .trim();
+
+  const start = cleaned.indexOf("{");
+  const end = cleaned.lastIndexOf("}");
+
+  if (start === -1 || end === -1 || end <= start) {
+    return null;
+  }
+
+  try {
+    const parsed = JSON.parse(cleaned.slice(start, end + 1));
+    const score = Math.round(Number(parsed.score));
+
+    if (!Number.isFinite(score)) {
+      return null;
+    }
+
+    return {
+      score: Math.min(Math.max(score, 0), 100),
+      summary: String(parsed.summary || "").trim(),
+      signals: Array.isArray(parsed.signals) ? parsed.signals.slice(0, 10) : []
+    };
+  } catch {
+    return null;
+  }
+}
+
+async function runIntentScan(brandMapId: string) {
+  const settings = await getAppSettings();
+  const brandMap: any = await BrandMap.findById(brandMapId).lean();
+
+  if (!brandMap) {
+    throw new Error("Brand map row not found");
+  }
+
+  await BrandMap.findByIdAndUpdate(brandMapId, {
+    $set: { intentStatus: "running" }
+  });
+
+  try {
+    const prompt = buildIntentPrompt(brandMap, settings.intentLookbackDays);
+    const text = await callOpenAIWithWebSearch(
+      prompt,
+      settings.intentModel || undefined
+    );
+
+    const parsed = parseIntentJson(text);
+
+    if (!parsed) {
+      throw new Error("AI returned no parseable intent JSON");
+    }
+
+    const updated = await BrandMap.findByIdAndUpdate(
+      brandMapId,
+      {
+        $set: {
+          intentScore: parsed.score,
+          intentSummary: parsed.summary,
+          intentSignals: parsed.signals,
+          intentCheckedAt: new Date(),
+          intentStatus: "done",
+          intentRaw: { text }
+        }
+      },
+      { new: true }
+    ).lean();
+
+    return updated;
+  } catch (error: any) {
+    // Keep any previous score; only the status flips to failed.
+    await BrandMap.findByIdAndUpdate(brandMapId, {
+      $set: { intentStatus: "failed" }
+    });
+
+    throw error;
+  }
+}
+
+function isIntentCacheFresh(brandMap: any, cacheDays: number) {
+  if (!brandMap?.intentCheckedAt) return false;
+
+  const ageMs = Date.now() - new Date(brandMap.intentCheckedAt).getTime();
+
+  return ageMs < cacheDays * 24 * 60 * 60 * 1000;
+}
+
+export async function findBrandIntent(req: Request, res: Response) {
+  try {
+    const id = String(req.params.id || "");
+
+    if (!mongoose.Types.ObjectId.isValid(id)) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid brand map id"
+      });
+    }
+
+    const settings = await getAppSettings();
+    const existing: any = await BrandMap.findById(id).lean();
+
+    if (!existing) {
+      return res.status(404).json({
+        success: false,
+        message: "Brand map row not found"
+      });
+    }
+
+    const force = Boolean(req.body?.force);
+
+    if (!force && isIntentCacheFresh(existing, settings.intentCacheDays)) {
+      return res.json({
+        success: true,
+        cached: true,
+        data: existing
+      });
+    }
+
+    const updated = await runIntentScan(id);
+
+    res.json({
+      success: true,
+      cached: false,
+      data: updated
+    });
+  } catch (error: any) {
+    res.status(500).json({
+      success: false,
+      message: error.message
+    });
+  }
+}
+
+// Bulk intent scans run sequentially in-process (same idiom as the export
+// job map in instantly.controller) with a small delay between calls.
+type IntentJob = {
+  total: number;
+  processed: number;
+  failed: number;
+  skippedCached: number;
+  done: boolean;
+  startedAt: number;
+};
+
+const intentJobs = new Map<string, IntentJob>();
+
+export async function runBulkIntent(req: Request, res: Response) {
+  try {
+    const ids: string[] = (
+      Array.isArray(req.body?.ids) ? req.body.ids : []
+    )
+      .map((id: any) => String(id))
+      .filter((id: string) => mongoose.Types.ObjectId.isValid(id));
+
+    if (ids.length === 0) {
+      return res.status(400).json({
+        success: false,
+        message: "ids is required"
+      });
+    }
+
+    if (ids.length > 50) {
+      return res.status(400).json({
+        success: false,
+        message: "Too many brands in one intent batch (max 50)."
+      });
+    }
+
+    const settings = await getAppSettings();
+    const rows = await BrandMap.find({ _id: { $in: ids } }).lean();
+
+    const force = Boolean(req.body?.force);
+    const toScan = rows.filter(
+      (row: any) => force || !isIntentCacheFresh(row, settings.intentCacheDays)
+    );
+    const skippedCached = rows.length - toScan.length;
+
+    const jobId =
+      "intent_" + Date.now().toString(36) + Math.floor(Math.random() * 1e6).toString(36);
+
+    const job: IntentJob = {
+      total: toScan.length,
+      processed: 0,
+      failed: 0,
+      skippedCached,
+      done: toScan.length === 0,
+      startedAt: Date.now()
+    };
+
+    intentJobs.set(jobId, job);
+
+    // Prune finished jobs older than an hour.
+    for (const [key, value] of intentJobs.entries()) {
+      if (value.done && Date.now() - value.startedAt > 60 * 60 * 1000) {
+        intentJobs.delete(key);
+      }
+    }
+
+    if (toScan.length > 0) {
+      setImmediate(async () => {
+        for (const row of toScan as any[]) {
+          try {
+            await runIntentScan(String(row._id));
+            job.processed += 1;
+          } catch (error: any) {
+            job.failed += 1;
+            console.error(
+              "Bulk intent scan failed for",
+              row.brandName,
+              "-",
+              error?.message || error
+            );
+          }
+
+          await new Promise((resolve) => setTimeout(resolve, 2000));
+        }
+
+        job.done = true;
+      });
+    }
+
+    res.status(202).json({
+      success: true,
+      jobId,
+      queued: toScan.length,
+      skippedCached
+    });
+  } catch (error: any) {
+    res.status(500).json({
+      success: false,
+      message: error.message
+    });
+  }
+}
+
+export async function getBulkIntentStatus(req: Request, res: Response) {
+  const jobId = String(req.params.jobId || "");
+  const job = intentJobs.get(jobId);
+
+  if (!job) {
+    return res.status(404).json({
+      success: false,
+      message: "Intent job not found (it may have expired)."
+    });
+  }
+
+  res.json({
+    success: true,
+    ...job
+  });
+}
+
+// "Run Web Scrape": queue a free scrape-only email discovery for one brand.
+export async function scrapeBrandWebsite(req: Request, res: Response) {
+  try {
+    const id = String(req.params.id || "");
+
+    if (!mongoose.Types.ObjectId.isValid(id)) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid brand map id"
+      });
+    }
+
+    const brandMap: any = await BrandMap.findById(id).lean();
+
+    if (!brandMap) {
+      return res.status(404).json({
+        success: false,
+        message: "Brand map row not found"
+      });
+    }
+
+    const domain = String(brandMap.domain || "").trim();
+
+    if (!domain || ["-", "N/A", "unspecified"].includes(domain)) {
+      return res.status(400).json({
+        success: false,
+        message: "This brand has no domain to scrape."
+      });
+    }
+
+    const requestedBy = String((req as any).user?.email || "");
+
+    const job = await intelligenceQueue.add(
+      "discover-emails",
+      {
+        brandMapId: id,
+        mode: "scrape_only",
+        requestedBy
+      },
+      {
+        attempts: 1,
+        removeOnComplete: false,
+        removeOnFail: false
+      }
+    );
+
+    await JobLog.findOneAndUpdate(
+      { jobId: String(job.id) },
+      {
+        $set: {
+          jobId: String(job.id),
+          type: "intelligence",
+          brandName: `Web scrape: ${brandMap.brandName || domain}`,
+          status: "queued",
+          currentStep: "QUEUED",
+          progress: 0,
+          message: "Web scrape queued",
+          startedAt: new Date(),
+          raw: {
+            kind: "discover-emails",
+            brandMapId: id,
+            mode: "scrape_only",
+            requestedBy
+          }
+        }
+      },
+      { upsert: true, returnDocument: "after" }
+    );
+
+    res.status(201).json({
+      success: true,
+      jobId: String(job.id),
+      brandName: brandMap.brandName || "",
+      domain
     });
   } catch (error: any) {
     res.status(500).json({

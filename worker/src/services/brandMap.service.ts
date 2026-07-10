@@ -2,6 +2,11 @@ import { RawYoutubeVideo } from "../models/RawYoutubeVideo.model";
 import { BrandMap } from "../models/BrandMap.model";
 import { ExcludedBrand } from "../models/ExcludedBrand.model";
 import { addPipelineTrackerLog } from "./pipelineTracker.service";
+import { getAppSettings } from "./appSettings.service";
+import {
+  normalizeBrandName as normalizeExcludedBrandName,
+  normalizeDomain as normalizeExcludedDomain
+} from "../utils/normalize";
 import {
   findOfficialDomainForBrand,
   cleanDomain,
@@ -156,9 +161,20 @@ function getRecencyTag(date: Date | null) {
 async function isExcludedBrand(brandName: string, domain: string) {
   const brand = cleanValue(brandName);
   const cleanDom = cleanDomain(domain);
+  const normalizedBrand = normalizeExcludedBrandName(brand);
+  const normalizedDom = normalizeExcludedDomain(cleanDom);
 
   const conditions: any[] = [];
 
+  if (normalizedBrand) {
+    conditions.push({ normalizedBrandName: normalizedBrand });
+  }
+
+  if (normalizedDom) {
+    conditions.push({ normalizedDomain: normalizedDom });
+  }
+
+  // Legacy fallback for rows created before the normalization migration ran.
   if (brand) {
     conditions.push({
       brandName: new RegExp("^" + escapeRegex(brand) + "$", "i")
@@ -239,7 +255,26 @@ function buildChannelNames(videos: any[], brandName: string) {
   return lines;
 }
 
-export async function buildBrandMapForSeedBrand(seedBrandId: string) {
+type BrandCandidate = {
+  brandName: string;
+  videos: any[];
+  channelCount: number;
+  videoCount: number;
+  mostRecentSponsorshipDate: Date | null;
+};
+
+export async function buildBrandMapForSeedBrand(
+  seedBrandId: string,
+  options: { maxBrands?: number; checkControl?: () => Promise<void> } = {}
+) {
+  const settings = await getAppSettings();
+
+  const requestedMax = Number(options.maxBrands);
+  const maxBrands =
+    Number.isFinite(requestedMax) && requestedMax > 0
+      ? Math.min(Math.max(Math.round(requestedMax), 10), 500)
+      : settings.maxBrandsPerSeed;
+
   const videos = await RawYoutubeVideo.find({
     seedBrandId
   }).lean();
@@ -283,17 +318,65 @@ export async function buildBrandMapForSeedBrand(seedBrandId: string) {
   let skippedMissingDomain = 0;
   let skippedDuplicateDomain = 0;
   let skippedSelfPromotion = 0;
+  let candidatesSkippedByCap = 0;
 
-  const brandNames = Array.from(grouped.keys());
+  // Pass 1: cheap in-memory metrics for every discovered brand, so the
+  // expensive per-brand work below (domain lookups) runs on the strongest
+  // candidates first and stops at the per-seed cap.
+  const candidates: BrandCandidate[] = [];
 
-  for (let i = 0; i < brandNames.length; i++) {
-    const brandName = brandNames[i];
+  for (const brandName of grouped.keys()) {
     const brandVideos = grouped.get(brandName) || [];
 
     if (isSelfPromotion(brandName, brandVideos)) {
       skippedSelfPromotion += 1;
       continue;
     }
+
+    candidates.push({
+      brandName,
+      videos: brandVideos,
+      channelCount: new Set(
+        brandVideos.map((video: any) => video.channelId).filter(Boolean)
+      ).size,
+      videoCount: brandVideos.length,
+      mostRecentSponsorshipDate: getLatestDate(brandVideos)
+    });
+  }
+
+  candidates.sort((a, b) => {
+    if (b.channelCount !== a.channelCount) {
+      return b.channelCount - a.channelCount;
+    }
+
+    const aTime = a.mostRecentSponsorshipDate?.getTime() || 0;
+    const bTime = b.mostRecentSponsorshipDate?.getTime() || 0;
+
+    if (bTime !== aTime) {
+      return bTime - aTime;
+    }
+
+    if (b.videoCount !== a.videoCount) {
+      return b.videoCount - a.videoCount;
+    }
+
+    return a.brandName.localeCompare(b.brandName);
+  });
+
+  // Pass 2: resolve domains and upsert, best candidates first. Skipped
+  // candidates (no domain / excluded / duplicate) do not consume cap slots,
+  // so the cap means "N usable brands".
+  for (let i = 0; i < candidates.length; i++) {
+    if (createdOrUpdated >= maxBrands) {
+      candidatesSkippedByCap = candidates.length - i;
+      break;
+    }
+
+    if (options.checkControl) {
+      await options.checkControl();
+    }
+
+    const { brandName, videos: brandVideos } = candidates[i];
 
     const productNames = unique(
       brandVideos.map((video: any) => video.productNameWithModel)
@@ -398,9 +481,6 @@ export async function buildBrandMapForSeedBrand(seedBrandId: string) {
           sourceVideoIds,
           sourceVideoUrls,
 
-          status: "domain_found",
-          isExcluded: false,
-
           raw: {
             videoCount: brandVideos.length,
             originalSponsorBrands: unique(
@@ -409,8 +489,12 @@ export async function buildBrandMapForSeedBrand(seedBrandId: string) {
             foundViaSeedBrand: foundVia
           }
         },
+        // status/isExcluded only on insert: a re-crawl must never resurrect
+        // a brand that was manually excluded or reset its selection state.
         $setOnInsert: {
-          createdAt: new Date()
+          createdAt: new Date(),
+          status: "domain_found",
+          isExcluded: false
         }
       },
       {
@@ -435,6 +519,8 @@ export async function buildBrandMapForSeedBrand(seedBrandId: string) {
     totalRawVideos: videos.length,
     validSponsoredVideos: validVideos.length,
     brandsCreatedOrUpdated: createdOrUpdated,
+    cappedAt: maxBrands,
+    candidatesSkippedByCap,
     skippedExcluded,
     skippedSeedBrand,
     skippedMissingDomain,

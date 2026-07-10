@@ -14,31 +14,24 @@ import { backfillInstantlyLeadVerificationAndGateway } from "../services/instant
 import { updateTotalEmailsForBrand } from "../services/totalEmails.service";
 import { addPipelineTrackerLog } from "../services/pipelineTracker.service";
 import { crawlLatestReviewVideos } from "../services/latestReviews.service";
+import { getAppSettings } from "../services/appSettings.service";
+import {
+  enforceCrawlerControl,
+  getStageState,
+  markJobCompleted,
+  markJobFailed,
+  markJobStopped,
+  registerActiveJob,
+  runStage,
+  unregisterActiveJob,
+  updateProgress
+} from "../services/jobControl.service";
 
 import { ClosedDeal } from "../models/ClosedDeal.model";
 import { BrandMap } from "../models/BrandMap.model";
 
 const BrandMapModel = BrandMap as any;
 const ClosedDealModel = ClosedDeal as any;
-
-const JobLogSchema = new mongoose.Schema(
-  {
-    jobId: String,
-    seedBrandId: mongoose.Schema.Types.ObjectId,
-    type: String,
-    status: String,
-    currentStep: String,
-    progress: Number,
-    message: String,
-    error: String,
-    startedAt: Date,
-    completedAt: Date,
-    totalFound: Number,
-    result: Object,
-    raw: Object
-  },
-  { timestamps: true, strict: false }
-);
 
 const SeedBrandSchema = new mongoose.Schema(
   {
@@ -51,182 +44,11 @@ const SeedBrandSchema = new mongoose.Schema(
   { timestamps: true }
 );
 
-const JobLog: any =
-  mongoose.models.JobLog || mongoose.model("JobLog", JobLogSchema);
-
 const SeedBrand: any =
   mongoose.models.SeedBrand || mongoose.model("SeedBrand", SeedBrandSchema);
 
 function cleanText(value: any) {
   return String(value || "").trim();
-}
-
-class CrawlStoppedError extends Error {
-  constructor(message = "Crawl stopped by user") {
-    super(message);
-    this.name = "CrawlStoppedError";
-  }
-}
-
-function delay(ms: number) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-function normalizeControlStatus(status: any) {
-  const value = cleanText(status).toLowerCase();
-
-  if (["stopped", "stop_requested", "cancelled", "canceled"].includes(value)) {
-    return "stopped";
-  }
-
-  if (value === "paused") {
-    return "paused";
-  }
-
-  return value;
-}
-
-async function readControlStatus(jobId: string) {
-  const log = await JobLog.findOne({ jobId }).lean();
-
-  return normalizeControlStatus(log?.status);
-}
-
-async function enforceCrawlerControl(jobId: string) {
-  let status = await readControlStatus(jobId);
-
-  if (status === "stopped") {
-    throw new CrawlStoppedError();
-  }
-
-  if (status !== "paused") {
-    return;
-  }
-
-  await JobLog.findOneAndUpdate(
-    { jobId },
-    {
-      $set: {
-        status: "paused",
-        currentStep: "PAUSED",
-        message: "Crawl paused. Resume to continue."
-      }
-    }
-  );
-
-  const pollMs = Number(process.env.CRAWL_CONTROL_POLL_MS || 3000);
-
-  while (status === "paused") {
-    await delay(pollMs > 0 ? pollMs : 3000);
-    status = await readControlStatus(jobId);
-
-    if (status === "stopped") {
-      throw new CrawlStoppedError();
-    }
-  }
-}
-
-async function updateProgress(
-  job: Job,
-  jobId: string,
-  currentStep: string,
-  progress: number,
-  extraSet: Record<string, any> = {}
-) {
-  await enforceCrawlerControl(jobId);
-
-  console.log("JOB STEP:", currentStep);
-
-  try {
-    await job.updateProgress(progress);
-  } catch {
-    // BullMQ progress update is helpful but not required.
-  }
-
-  await JobLog.findOneAndUpdate(
-    { jobId },
-    {
-      $set: {
-        status: "running",
-        currentStep,
-        message: currentStep,
-        progress,
-        ...extraSet
-      }
-    },
-    {
-      upsert: true,
-      new: true
-    }
-  );
-}
-
-async function markJobCompleted(
-  jobId: string,
-  currentStep: string,
-  result: Record<string, any> = {}
-) {
-  await JobLog.findOneAndUpdate(
-    { jobId },
-    {
-      $set: {
-        status: "completed",
-        currentStep,
-        message: currentStep,
-        progress: 100,
-        completedAt: new Date(),
-        result,
-        error: ""
-      }
-    },
-    {
-      upsert: true,
-      new: true
-    }
-  );
-}
-
-async function markJobStopped(jobId: string, message = "Crawl stopped by user") {
-  await JobLog.findOneAndUpdate(
-    { jobId },
-    {
-      $set: {
-        status: "stopped",
-        currentStep: "STOPPED",
-        message,
-        completedAt: new Date(),
-        error: ""
-      },
-      $unset: {
-        pausedAt: ""
-      }
-    },
-    {
-      upsert: true,
-      new: true
-    }
-  );
-}
-
-async function markJobFailed(jobId: string, error: any) {
-  const message = error?.message || String(error);
-
-  await JobLog.findOneAndUpdate(
-    { jobId },
-    {
-      $set: {
-        status: "failed",
-        currentStep: "PIPELINE_FAILED",
-        message,
-        completedAt: new Date(),
-        error: message
-      }
-    },
-    {
-      upsert: true,
-      new: true
-    }
-  );
 }
 
 async function incrementClosedDealCrawlCount(seedBrand: any, seedBrandId: string) {
@@ -337,9 +159,11 @@ async function exportDiscoveredBrandsToInstantly(
   };
 }
 
-export async function intelligenceProcessor(job: Job) {
+export async function intelligenceProcessor(job: Job, token?: string) {
   const { seedBrandId } = job.data;
   const jobId = String(job.id);
+
+  registerActiveJob(jobId, job, token);
 
   try {
     if (job.name === "refresh-latest-reviews") {
@@ -370,11 +194,19 @@ export async function intelligenceProcessor(job: Job) {
       throw new Error("Seed brand name is missing");
     }
 
+    // If the job re-entered while paused, block here before touching state.
+    await enforceCrawlerControl(jobId);
+
+    const settings = await getAppSettings(true);
+    const stageState = await getStageState(jobId);
+    const checkControl = () => enforceCrawlerControl(jobId);
+
     console.log("====================================");
     console.log("MASTER PIPELINE STARTED");
     console.log("JOB ID:", jobId);
     console.log("SEED BRAND:", seedBrandName);
     console.log("SEED PRODUCT:", seedProductName || "-");
+    console.log("MANUAL SELECTION MODE:", settings.manualSelectionMode);
     console.log("====================================");
 
     await SeedBrand.findByIdAndUpdate(seedBrandId, {
@@ -392,12 +224,14 @@ export async function intelligenceProcessor(job: Job) {
 
     await updateProgress(job, jobId, "CRAWL_BRANDS_STARTED", 5);
 
-    const crawlResult = await crawlSeedBrandYoutubeVideos({
-      seedBrandId,
-      brandName: seedBrandName,
-      productName: seedProductName,
-      checkControl: () => enforceCrawlerControl(jobId)
-    });
+    const crawlResult = await runStage(jobId, "CRAWL", stageState, () =>
+      crawlSeedBrandYoutubeVideos({
+        seedBrandId,
+        brandName: seedBrandName,
+        productName: seedProductName,
+        checkControl
+      })
+    );
 
     await updateProgress(
       job,
@@ -408,9 +242,8 @@ export async function intelligenceProcessor(job: Job) {
 
     await updateProgress(job, jobId, "PROCESS_RAW_VIDEOS_STARTED", 30);
 
-    const aiResult = await analyzeUnprocessedRawVideos(
-      seedBrandId,
-      () => enforceCrawlerControl(jobId)
+    const aiResult = await runStage(jobId, "AI_ANALYSIS", stageState, () =>
+      analyzeUnprocessedRawVideos(seedBrandId, checkControl)
     );
 
     await updateProgress(
@@ -422,7 +255,12 @@ export async function intelligenceProcessor(job: Job) {
 
     await updateProgress(job, jobId, "FILL_BRAND_MAP_STARTED", 50);
 
-    const brandMapResult = await buildBrandMapForSeedBrand(seedBrandId);
+    const brandMapResult = await runStage(jobId, "BRAND_MAP", stageState, () =>
+      buildBrandMapForSeedBrand(seedBrandId, {
+        maxBrands: Number(job.data?.maxBrands) || undefined,
+        checkControl
+      })
+    );
 
     await updateProgress(
       job,
@@ -435,7 +273,9 @@ export async function intelligenceProcessor(job: Job) {
 
     await updateProgress(job, jobId, "NICHE_ANALYSIS_STARTED", 62);
 
-    const nicheResult = await rebuildNicheAnalysis();
+    const nicheResult = await runStage(jobId, "NICHE", stageState, () =>
+      rebuildNicheAnalysis()
+    );
 
     await updateProgress(
       job,
@@ -444,11 +284,54 @@ export async function intelligenceProcessor(job: Job) {
       64
     );
 
-    await incrementClosedDealCrawlCount(seedBrand, seedBrandId);
+    await runStage(jobId, "CRAWL_COUNT", stageState, async () => {
+      await incrementClosedDealCrawlCount(seedBrand, seedBrandId);
+      return { incremented: true };
+    });
+
+    if (settings.manualSelectionMode) {
+      await addPipelineTrackerLog({
+        type: "Seed",
+        brandName: seedBrandName,
+        domain: "",
+        status: "COMPLETE - Awaiting brand selection"
+      });
+
+      await SeedBrand.findByIdAndUpdate(seedBrandId, {
+        $set: {
+          status: "completed"
+        }
+      });
+
+      await markJobCompleted(jobId, "COMPLETE_AWAITING_SELECTION", {
+        crawlResult,
+        aiResult,
+        brandMapResult,
+        nicheResult,
+        manualSelectionMode: true
+      });
+
+      console.log("====================================");
+      console.log("PIPELINE COMPLETE — AWAITING BRAND SELECTION");
+      console.log("JOB ID:", jobId);
+      console.log("SEED BRAND:", seedBrandName);
+      console.log("====================================");
+
+      return {
+        success: true,
+        awaitingSelection: true,
+        crawlResult,
+        aiResult,
+        brandMapResult,
+        nicheResult
+      };
+    }
 
     await updateProgress(job, jobId, "DOMAIN_FINDER_STARTED", 68);
 
-    const domainResult = await fillMissingDomainsForSeed(seedBrandName);
+    const domainResult = await runStage(jobId, "DOMAIN_FINDER", stageState, () =>
+      fillMissingDomainsForSeed(seedBrandName)
+    );
 
     console.log("Domain finder result:", domainResult);
 
@@ -461,8 +344,11 @@ export async function intelligenceProcessor(job: Job) {
 
     await updateProgress(job, jobId, "EMAIL_DISCOVERY_STARTED", 80);
 
-    const emailDiscoveryResult = await discoverEmailsForPendingBrands(
-      seedBrandName
+    const emailDiscoveryResult = await runStage(
+      jobId,
+      "EMAIL_DISCOVERY",
+      stageState,
+      () => discoverEmailsForPendingBrands(seedBrandName)
     );
 
     console.log("Email discovery result:", emailDiscoveryResult);
@@ -478,7 +364,12 @@ export async function intelligenceProcessor(job: Job) {
 
     await updateProgress(job, jobId, "EMAIL_VERIFICATION_STARTED", 92);
 
-    const verificationResult = await verifyPendingContacts();
+    const verificationResult = await runStage(
+      jobId,
+      "EMAIL_VERIFICATION",
+      stageState,
+      () => verifyPendingContacts()
+    );
 
     console.log("Verification result:", verificationResult);
 
@@ -493,11 +384,17 @@ export async function intelligenceProcessor(job: Job) {
 
     await updateProgress(job, jobId, "INSTANTLY_EXPORT_STARTED", 96);
 
-    const instantlyExportResult = await exportDiscoveredBrandsToInstantly(
-      job,
+    const instantlyExportResult = await runStage(
       jobId,
-      seedBrandId,
-      seedBrandName
+      "INSTANTLY_EXPORT",
+      stageState,
+      () =>
+        exportDiscoveredBrandsToInstantly(
+          job,
+          jobId,
+          seedBrandId,
+          seedBrandName
+        )
     );
 
     console.log("Instantly export result:", instantlyExportResult);
@@ -513,7 +410,12 @@ export async function intelligenceProcessor(job: Job) {
 
     await updateProgress(job, jobId, "INSTANTLY_COMPETITORS_STARTED", 98);
 
-    const instantlyCompetitorResult = await fillInstantlyLeadCompetitors();
+    const instantlyCompetitorResult = await runStage(
+      jobId,
+      "INSTANTLY_COMPETITORS",
+      stageState,
+      () => fillInstantlyLeadCompetitors()
+    );
 
     console.log("Instantly competitor result:", instantlyCompetitorResult);
 
@@ -528,8 +430,12 @@ export async function intelligenceProcessor(job: Job) {
 
     await updateProgress(job, jobId, "INSTANTLY_VERIFICATION_GATEWAY_STARTED", 99);
 
-    const instantlyHygieneResult =
-      await backfillInstantlyLeadVerificationAndGateway();
+    const instantlyHygieneResult = await runStage(
+      jobId,
+      "INSTANTLY_HYGIENE",
+      stageState,
+      () => backfillInstantlyLeadVerificationAndGateway()
+    );
 
     console.log("Instantly verification/gateway result:", instantlyHygieneResult);
 
@@ -544,7 +450,9 @@ export async function intelligenceProcessor(job: Job) {
       99
     );
 
-    await rebuildNicheAnalysis();
+    await runStage(jobId, "NICHE_FINAL", stageState, () =>
+      rebuildNicheAnalysis()
+    );
 
     await addPipelineTrackerLog({
       type: "Seed",
@@ -592,6 +500,12 @@ export async function intelligenceProcessor(job: Job) {
       instantlyHygieneResult
     };
   } catch (error: any) {
+    // A long pause re-queues the job as delayed; BullMQ owns it from here.
+    // This must not be recorded as a failure.
+    if (error?.name === "DelayedError") {
+      throw error;
+    }
+
     const { seedBrandId } = job.data;
     const failedSeedBrand: any = await SeedBrand.findById(seedBrandId).lean();
 
@@ -641,5 +555,7 @@ export async function intelligenceProcessor(job: Job) {
     await markJobFailed(jobId, error);
 
     throw error;
+  } finally {
+    unregisterActiveJob(jobId);
   }
 }

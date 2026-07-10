@@ -19,7 +19,8 @@ export function getYoutubeApiKey() {
     );
   }
 
-  return keys[currentKeyIndex];
+  // Clamp so an exhausted rotation still returns the last key instead of undefined.
+  return keys[Math.min(currentKeyIndex, keys.length - 1)];
 }
 
 export function rotateYoutubeApiKey() {
@@ -36,6 +37,10 @@ export function rotateYoutubeApiKey() {
   );
 
   return true;
+}
+
+export function resetYoutubeKeyRotation() {
+  currentKeyIndex = 0;
 }
 
 export function getCurrentYoutubeKeyIndex() {

@@ -18,6 +18,7 @@ const InstantlyLeadSchema = new mongoose.Schema(
     competitor2: String,
 
     pushedStatus: String,
+    pushedAt: Date,
     verificationStatus: String,
     instantlyBounced: String,
     gatewayBounced: String,
@@ -25,6 +26,9 @@ const InstantlyLeadSchema = new mongoose.Schema(
     brandMapId: mongoose.Schema.Types.ObjectId,
     contactId: mongoose.Schema.Types.ObjectId,
     campaignId: String,
+
+    // Cooling-off audit trail: one entry per release of this lead.
+    releaseHistory: [Object],
 
     raw: Object
   },
@@ -35,6 +39,7 @@ InstantlyLeadSchema.index({ channel: 1, email: 1 }, { unique: true });
 InstantlyLeadSchema.index({ email: 1 });
 InstantlyLeadSchema.index({ companyName: 1 });
 InstantlyLeadSchema.index({ pushedStatus: 1 });
+InstantlyLeadSchema.index({ pushedAt: 1 });
 InstantlyLeadSchema.index({ verificationStatus: 1 });
 InstantlyLeadSchema.index({ instantlyBounced: 1 });
 

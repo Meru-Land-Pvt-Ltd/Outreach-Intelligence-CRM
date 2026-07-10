@@ -2,8 +2,8 @@
 
 import type { FormEvent } from "react";
 import { useEffect, useMemo, useState } from "react";
-import { Pause, Play, Plus, Square } from "lucide-react";
-import { apiGet, apiPost } from "@/lib/api";
+import { Pause, Play, Plus, Settings2, Square } from "lucide-react";
+import { apiGet, apiPost, apiPut } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Notice } from "@/components/shared/notice";
@@ -293,6 +293,207 @@ function Section({
   );
 }
 
+type PipelineSettings = {
+  manualSelectionMode: boolean;
+  maxBrandsPerSeed: number;
+  maxEmailsPerBrand: number;
+  scrapeFirstSkipPaid: boolean;
+  scrapeSkipThreshold: number;
+  coolingOffMonths: number;
+};
+
+function SettingsNumberField({
+  label,
+  value,
+  min,
+  max,
+  onChange,
+}: {
+  label: string;
+  value: number;
+  min: number;
+  max: number;
+  onChange: (value: number) => void;
+}) {
+  return (
+    <label className="space-y-2">
+      <span className="text-sm font-semibold text-slate-800">{label}</span>
+      <Input
+        type="number"
+        min={min}
+        max={max}
+        value={String(value)}
+        onChange={(e) => onChange(Number(e.target.value))}
+        className="h-11 border-slate-200"
+      />
+    </label>
+  );
+}
+
+function SettingsToggleField({
+  label,
+  hint,
+  checked,
+  onChange,
+}: {
+  label: string;
+  hint: string;
+  checked: boolean;
+  onChange: (value: boolean) => void;
+}) {
+  return (
+    <label className="flex items-start gap-3 rounded-xl border border-slate-200 bg-slate-50/60 p-4">
+      <input
+        type="checkbox"
+        checked={checked}
+        onChange={(e) => onChange(e.target.checked)}
+        className="mt-1 h-4 w-4 rounded border-slate-300"
+      />
+      <span>
+        <span className="block text-sm font-semibold text-slate-800">{label}</span>
+        <span className="block text-xs font-medium text-slate-500">{hint}</span>
+      </span>
+    </label>
+  );
+}
+
+function PipelineSettingsCard() {
+  const [open, setOpen] = useState(false);
+  const [settings, setSettings] = useState<PipelineSettings | null>(null);
+  const [saving, setSaving] = useState(false);
+  const [message, setMessage] = useState<NoticeState | null>(null);
+
+  useEffect(() => {
+    let active = true;
+
+    async function loadSettings() {
+      const response = await apiGet("/settings");
+
+      if (active && response?.data) {
+        setSettings(response.data);
+      }
+    }
+
+    loadSettings();
+
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  function update<K extends keyof PipelineSettings>(
+    key: K,
+    value: PipelineSettings[K]
+  ) {
+    setSettings((prev) => (prev ? { ...prev, [key]: value } : prev));
+  }
+
+  async function handleSave() {
+    if (!settings) return;
+
+    setSaving(true);
+    setMessage(null);
+
+    const response: any = await apiPut("/settings", settings);
+
+    if (response?.success) {
+      setSettings(response.data || settings);
+      setMessage({ type: "success", text: "Settings saved." });
+    } else {
+      setMessage({
+        type: "error",
+        text: response?.message || "Failed to save settings.",
+      });
+    }
+
+    setSaving(false);
+  }
+
+  return (
+    <section className="rounded-2xl border border-slate-200 bg-white shadow-sm">
+      <button
+        type="button"
+        onClick={() => setOpen((prev) => !prev)}
+        className="flex w-full items-center justify-between px-5 py-4 text-left"
+      >
+        <span className="flex items-center gap-2 text-base font-bold text-slate-950">
+          <Settings2 className="h-4 w-4 text-blue-600" />
+          Pipeline Settings
+        </span>
+        <span className="text-xs font-semibold text-slate-500">
+          {open ? "Hide" : "Show"}
+        </span>
+      </button>
+
+      {open ? (
+        <div className="space-y-4 border-t border-slate-100 px-5 py-5">
+          {message ? <Notice type={message.type} text={message.text} /> : null}
+
+          {!settings ? (
+            <p className="text-sm font-medium text-slate-500">
+              Loading settings…
+            </p>
+          ) : (
+            <>
+              <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
+                <SettingsToggleField
+                  label="Manual brand selection"
+                  hint="Crawls stop at the Brand Map. Email discovery and Instantly export run only for brands you approve."
+                  checked={settings.manualSelectionMode}
+                  onChange={(value) => update("manualSelectionMode", value)}
+                />
+                <SettingsToggleField
+                  label="Website scrape first"
+                  hint="Skip paid providers (Hunter, Apollo, Prospeo) when the free website scrape already found enough emails."
+                  checked={settings.scrapeFirstSkipPaid}
+                  onChange={(value) => update("scrapeFirstSkipPaid", value)}
+                />
+              </div>
+
+              <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
+                <SettingsNumberField
+                  label="Max brands per seed"
+                  value={settings.maxBrandsPerSeed}
+                  min={10}
+                  max={500}
+                  onChange={(value) => update("maxBrandsPerSeed", value)}
+                />
+                <SettingsNumberField
+                  label="Max emails per brand"
+                  value={settings.maxEmailsPerBrand}
+                  min={1}
+                  max={10}
+                  onChange={(value) => update("maxEmailsPerBrand", value)}
+                />
+                <SettingsNumberField
+                  label="Scrape skip threshold"
+                  value={settings.scrapeSkipThreshold}
+                  min={1}
+                  max={10}
+                  onChange={(value) => update("scrapeSkipThreshold", value)}
+                />
+                <SettingsNumberField
+                  label="Cooling-off months"
+                  value={settings.coolingOffMonths}
+                  min={1}
+                  max={24}
+                  onChange={(value) => update("coolingOffMonths", value)}
+                />
+              </div>
+
+              <div className="flex justify-end">
+                <Button onClick={handleSave} disabled={saving}>
+                  {saving ? "Saving…" : "Save Settings"}
+                </Button>
+              </div>
+            </>
+          )}
+        </div>
+      ) : null}
+    </section>
+  );
+}
+
 export default function ControlPanelPage() {
   const [seedDeals, setSeedDeals] = useState<SeedDeal[]>([]);
   const [activeCrawls, setActiveCrawls] = useState<CrawlJob[]>([]);
@@ -306,6 +507,7 @@ export default function ControlPanelPage() {
 
   const [recentPage, setRecentPage] = useState(1);
   const [activePage, setActivePage] = useState(1);
+  const [runCaps, setRunCaps] = useState<Record<string, string>>({});
 
   const [form, setForm] = useState({
     month: "",
@@ -507,10 +709,14 @@ export default function ControlPanelPage() {
     setRunningSeedBrandId(seedBrandId);
     setNotice(null);
 
+    const capValue = Number(runCaps[seedBrandId]);
+    const maxBrands =
+      Number.isFinite(capValue) && capValue > 0 ? capValue : undefined;
+
     try {
       const response: any = await apiPost(
         `/jobs/run-intelligence/${seedBrandId}`,
-        {}
+        maxBrands ? { maxBrands } : {}
       );
 
       if (!response?.success) {
@@ -735,6 +941,8 @@ export default function ControlPanelPage() {
       </div>
 
       {notice ? <Notice type={notice.type} text={notice.text} /> : null}
+
+      <PipelineSettingsCard />
 
       <Section title="Create New Run">
         <form
@@ -963,16 +1171,34 @@ export default function ControlPanelPage() {
               const isRunning = runningSeedBrandId === seedBrandId;
 
               return (
-                <Button
-                  type="button"
-                  size="sm"
-                  disabled={isRunning}
-                  onClick={() => handleRunCrawl(row)}
-                  className="h-9 rounded-md bg-blue-600 px-4 text-white hover:bg-blue-700"
-                >
-                  <Play className="mr-2 h-3.5 w-3.5 fill-current" />
-                  {isRunning ? "Running..." : "Run Crawl"}
-                </Button>
+                <div className="flex items-center justify-end gap-2">
+                  <Input
+                    type="number"
+                    min={10}
+                    max={500}
+                    placeholder="Brands"
+                    title="Max brands for this crawl (leave empty for the default cap)"
+                    value={runCaps[seedBrandId] || ""}
+                    onChange={(e) =>
+                      setRunCaps((prev) => ({
+                        ...prev,
+                        [seedBrandId]: e.target.value,
+                      }))
+                    }
+                    className="h-9 w-24 border-slate-200"
+                  />
+
+                  <Button
+                    type="button"
+                    size="sm"
+                    disabled={isRunning}
+                    onClick={() => handleRunCrawl(row)}
+                    className="h-9 rounded-md bg-blue-600 px-4 text-white hover:bg-blue-700"
+                  >
+                    <Play className="mr-2 h-3.5 w-3.5 fill-current" />
+                    {isRunning ? "Running..." : "Run Crawl"}
+                  </Button>
+                </div>
               );
             },
           }}

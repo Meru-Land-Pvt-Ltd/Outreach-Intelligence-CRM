@@ -59,6 +59,9 @@ const ContactSchema = new mongoose.Schema(
     verifierSubResult: String,
     verifiedAt: Date,
 
+    pushedAt: Date,
+    instantlyCampaignId: String,
+
     raw: Object
   },
   { timestamps: true }

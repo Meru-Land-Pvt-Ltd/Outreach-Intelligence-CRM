@@ -10,6 +10,7 @@ import {
   getYoutubeVideoDetails,
   getYoutubeChannelDetails
 } from "./youtubeApi.service";
+import { resetYoutubeKeyRotation } from "./youtubeKey.service";
 
 type CrawlInput = {
   seedBrandId: string;
@@ -292,6 +293,10 @@ async function collectRecentVideosFromChannels(channels: any[], checkControl?: (
 }
 
 export async function crawlSeedBrandYoutubeVideos(input: CrawlInput) {
+  // Each crawl starts from the first key so an earlier crawl's quota rotation
+  // never leaves this one stuck past the end of the key list.
+  resetYoutubeKeyRotation();
+
   console.log("Seed brand:", input.brandName);
   console.log("Seed product:", input.productName || "");
 

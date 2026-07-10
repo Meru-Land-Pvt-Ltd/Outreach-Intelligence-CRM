@@ -144,6 +144,69 @@ export async function verifyPendingContacts() {
   };
 }
 
+// Contacts are keyed by brandName+domain (see saveContact), so this is the
+// reliable scope for verifying just-discovered contacts of a selected brand.
+export async function verifyContactsForBrand(brandName: string, domain: string) {
+  const contacts = await ContactModel.find({
+    brandName,
+    domain,
+    email: { $exists: true, $nin: ["", null] },
+    verificationStatus: {
+      $in: ["", null, "not_verified", "verification_pending"]
+    }
+  }).sort({ createdAt: 1 });
+
+  let verified = 0;
+  let risky = 0;
+  let invalid = 0;
+  let failed = 0;
+
+  for (const contact of contacts as any[]) {
+    const email = cleanEmail(contact.email);
+
+    if (!email) continue;
+
+    try {
+      const result = await verifyEmail(email);
+
+      await ContactModel.findByIdAndUpdate(contact._id, {
+        $set: {
+          status: result.status,
+          verificationStatus: result.verificationStatus,
+          verifierResult: result.verifierResult,
+          verifierRaw: result.raw,
+          verifiedAt: new Date()
+        }
+      });
+
+      if (result.verificationStatus === "Ok") verified += 1;
+      else if (result.status === "invalid") invalid += 1;
+      else risky += 1;
+    } catch (error: any) {
+      failed += 1;
+
+      await ContactModel.findByIdAndUpdate(contact._id, {
+        $set: {
+          status: "verification_error",
+          verificationStatus: "verification_error",
+          verifierResult: cleanText(error.message),
+          verifiedAt: new Date()
+        }
+      });
+    }
+
+    await new Promise((resolve) => setTimeout(resolve, 250));
+  }
+
+  return {
+    scanned: contacts.length,
+    verified,
+    risky,
+    invalid,
+    failed
+  };
+}
+
 export async function verifyContactsForSeedBrand(seedBrandId: string) {
   const contacts = await ContactModel.find({
     seedBrandId,

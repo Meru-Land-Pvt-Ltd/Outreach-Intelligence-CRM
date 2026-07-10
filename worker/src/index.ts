@@ -2,6 +2,10 @@ import "dotenv/config";
 import mongoose from "mongoose";
 import { Worker } from "bullmq";
 import { intelligenceProcessor } from "./processors/intelligence.processor";
+import {
+  discoverEmailsJob,
+  processSelectedBrandsJob
+} from "./processors/manualActions.processor";
 
 const mongoUri = process.env.MONGODB_URI || "";
 const queueName = process.env.INTELLIGENCE_QUEUE_NAME || "intelligence";
@@ -28,18 +32,22 @@ async function startWorker() {
 
   const worker = new Worker(
     queueName,
-    async (job) => {
+    async (job, token) => {
       console.log("Worker received job:", {
         id: job.id,
         name: job.name,
         data: job.data
       });
 
-      if (job.name === "run-intelligence" || job.name === "intelligence") {
-        return intelligenceProcessor(job);
+      if (job.name === "process-selected-brands") {
+        return processSelectedBrandsJob(job, token);
       }
 
-      return intelligenceProcessor(job);
+      if (job.name === "discover-emails") {
+        return discoverEmailsJob(job, token);
+      }
+
+      return intelligenceProcessor(job, token);
     },
     {
       connection: redisConnection,
@@ -53,6 +61,10 @@ async function startWorker() {
 
   worker.on("failed", (job, error) => {
     console.error("Worker job failed:", job?.id, error.message);
+  });
+
+  worker.on("error", (error) => {
+    console.error("Worker error:", error?.message || error);
   });
 
   console.log("Worker started and listening for intelligence jobs");

@@ -21,14 +21,27 @@ export async function rebuildNicheAnalysis() {
     }
   ]);
 
-  await NicheAnalysis.deleteMany({});
+  // Upsert per niche instead of wipe-and-recreate, so readers never see an
+  // empty table mid-rebuild (and concurrent rebuilds stay consistent).
+  const nicheNames: string[] = [];
 
   for (const item of result) {
-    await NicheAnalysis.create({
-      nicheName: item._id,
-      brandCount: item.brandCount
-    });
+    nicheNames.push(item._id);
+
+    await NicheAnalysis.findOneAndUpdate(
+      { nicheName: item._id },
+      {
+        $set: {
+          brandCount: item.brandCount
+        }
+      },
+      { upsert: true }
+    );
   }
+
+  await NicheAnalysis.deleteMany({
+    nicheName: { $nin: nicheNames }
+  });
 
   return {
     nicheCount: result.length

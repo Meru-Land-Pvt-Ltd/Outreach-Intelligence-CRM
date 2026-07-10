@@ -20,6 +20,13 @@ const InstantlyCampaignSchema = new mongoose.Schema(
     pushedAt: Date,
     activatedAt: Date,
 
+    // Niche grouping: majority niche of the pushed leads plus the Instantly
+    // custom tags assigned to the campaign.
+    niche: String,
+    niches: [String],
+    tagIds: [String],
+    tagError: String,
+
     raw: Object
   },
   { timestamps: true }

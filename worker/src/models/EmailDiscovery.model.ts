@@ -19,6 +19,11 @@ const EmailDiscoverySchema = new mongoose.Schema(
     prospeoCheckedAt: { type: Date, default: null },
     prospeoAllCheckedAt: { type: Date, default: null },
 
+    discoveryMode: { type: String, default: "" },
+    providersSkipped: { type: [String], default: [] },
+    scrapeEmailCount: { type: Number, default: 0 },
+    scrapeCheckedAt: { type: Date, default: null },
+
     foundVia: { type: String, default: "" },
     seedBrandId: { type: mongoose.Schema.Types.ObjectId, default: null },
     brandMapId: { type: mongoose.Schema.Types.ObjectId, default: null },

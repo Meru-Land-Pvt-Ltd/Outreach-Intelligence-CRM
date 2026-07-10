@@ -17,7 +17,7 @@ services:
     depends_on:
       - redis
     ports:
-      - "127.0.0.1:5000:5000"
+      - "127.0.0.1:8010:8010"
     restart: unless-stopped
 
   worker:
@@ -45,7 +45,7 @@ services:
     depends_on:
       - backend
     ports:
-      - "127.0.0.1:3000:3000"
+      - "127.0.0.1:3005:3000"
     restart: unless-stopped
 
 volumes:

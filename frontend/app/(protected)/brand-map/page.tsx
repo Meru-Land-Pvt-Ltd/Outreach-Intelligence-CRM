@@ -1,16 +1,18 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import { apiGet } from "@/lib/api";
+import Link from "next/link";
+import { Ban, Globe, RotateCcw, Send, Sparkles, X } from "lucide-react";
+import { apiGet, apiPost } from "@/lib/api";
 import { cn } from "@/lib/utils";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { Notice } from "@/components/shared/notice";
 import AdminTable, {
   type AdminTableColumn,
 } from "@/components/ui/tableComp";
 import { FilterSearchInput } from "@/components/shared/filter-search-input";
 import { FilterSelect } from "@/components/shared/filter-select";
-import Link from "next/dist/client/link";
 
 type BrandMapRow = {
   _id?: string;
@@ -22,12 +24,24 @@ type BrandMapRow = {
   recencyTag?: string;
   niche?: string;
   domain?: string;
+  selectionStatus?: string;
+  intentScore?: number;
+  intentSummary?: string;
+  intentStatus?: string;
+  intentCheckedAt?: string;
   createdAt?: string;
   updatedAt?: string;
 };
 
+type NoticeState = {
+  type: "success" | "error";
+  text: string;
+};
+
 const PAGE_SIZE = 1000;
 const ALL_VALUE = "All";
+const BULK_CHUNK_SIZE = 400;
+const PROCESS_CHUNK_SIZE = 150;
 
 function clean(value: unknown) {
   return String(value || "").trim();
@@ -85,17 +99,6 @@ function toOptions(items: string[]) {
   ];
 }
 
-function getChannelNames(row: BrandMapRow) {
-  const names = Array.isArray(row.channelNames)
-    ? row.channelNames.filter(Boolean)
-    : [];
-
-  if (names.length === 0) return "-";
-  if (names.length <= 3) return names.join(", ");
-
-  return `${names.slice(0, 3).join(", ")}, +${names.length - 3}`;
-}
-
 function getDomainUrl(value?: string) {
   const domain = clean(value);
 
@@ -106,6 +109,14 @@ function getDomainUrl(value?: string) {
   }
 
   return `https://${domain}`;
+}
+
+function getSelectionStatus(row: BrandMapRow) {
+  const value = clean(row.selectionStatus).toLowerCase();
+
+  if (value === "approved" || value === "excluded") return value;
+
+  return "pending";
 }
 
 function RecencyBadge({ value }: { value?: string }) {
@@ -119,12 +130,17 @@ function RecencyBadge({ value }: { value?: string }) {
     <Badge
       className={cn(
         "rounded-full px-2.5 py-1 text-xs font-semibold",
-        lower === "new" && "bg-emerald-50 text-emerald-700 hover:bg-emerald-50",
-        lower === "recent" && "bg-blue-50 text-blue-700 hover:bg-blue-50",
-        lower === "mid" && "bg-amber-50 text-amber-700 hover:bg-amber-50",
-        lower === "old" && "bg-slate-100 text-slate-600 hover:bg-slate-100",
-        !["new", "recent", "mid", "old"].includes(lower) &&
-        "bg-slate-100 text-slate-600 hover:bg-slate-100"
+        lower.includes("30") && "bg-emerald-50 text-emerald-700 hover:bg-emerald-50",
+        lower.includes("60") && "bg-blue-50 text-blue-700 hover:bg-blue-50",
+        lower.includes("90") &&
+          !lower.includes("+") &&
+          "bg-amber-50 text-amber-700 hover:bg-amber-50",
+        (lower.includes("90+") || lower.includes("old")) &&
+          "bg-slate-100 text-slate-600 hover:bg-slate-100",
+        !lower.includes("30") &&
+          !lower.includes("60") &&
+          !lower.includes("90") &&
+          "bg-slate-100 text-slate-600 hover:bg-slate-100"
       )}
     >
       {tag}
@@ -132,15 +148,91 @@ function RecencyBadge({ value }: { value?: string }) {
   );
 }
 
+function SelectionBadge({ row }: { row: BrandMapRow }) {
+  const status = getSelectionStatus(row);
+
+  return (
+    <Badge
+      className={cn(
+        "rounded-full px-2.5 py-1 text-xs font-semibold capitalize",
+        status === "approved" &&
+          "bg-emerald-50 text-emerald-700 hover:bg-emerald-50",
+        status === "excluded" && "bg-rose-50 text-rose-700 hover:bg-rose-50",
+        status === "pending" && "bg-slate-100 text-slate-600 hover:bg-slate-100"
+      )}
+    >
+      {status}
+    </Badge>
+  );
+}
+
+function IntentBadge({ row }: { row: BrandMapRow }) {
+  if (row.intentStatus === "running") {
+    return (
+      <Badge className="rounded-full bg-blue-50 px-2.5 py-1 text-xs font-semibold text-blue-700 hover:bg-blue-50">
+        Scanning…
+      </Badge>
+    );
+  }
+
+  const score = Number(row.intentScore);
+
+  if (!Number.isFinite(score)) {
+    return (
+      <span
+        className="text-sm font-medium text-slate-400"
+        title={row.intentStatus === "failed" ? "Last scan failed" : "Not scanned yet"}
+      >
+        {row.intentStatus === "failed" ? "failed" : "—"}
+      </span>
+    );
+  }
+
+  return (
+    <span title={row.intentSummary || ""}>
+      <Badge
+        className={cn(
+          "rounded-full px-2.5 py-1 text-xs font-semibold",
+          score >= 70 && "bg-emerald-50 text-emerald-700 hover:bg-emerald-50",
+          score >= 40 && score < 70 && "bg-amber-50 text-amber-700 hover:bg-amber-50",
+          score < 40 && "bg-slate-100 text-slate-600 hover:bg-slate-100"
+        )}
+      >
+        {score} · {score >= 70 ? "Hot" : score >= 40 ? "Warm" : "Cold"}
+      </Badge>
+    </span>
+  );
+}
+
+function chunkArray<T>(items: T[], size: number) {
+  const chunks: T[][] = [];
+
+  for (let i = 0; i < items.length; i += size) {
+    chunks.push(items.slice(i, i + size));
+  }
+
+  return chunks;
+}
+
 export default function BrandMapPage() {
   const [brands, setBrands] = useState<BrandMapRow[]>([]);
   const [loading, setLoading] = useState(true);
+  const [notice, setNotice] = useState<NoticeState | null>(null);
 
   const [search, setSearch] = useState("");
   const [foundVia, setFoundVia] = useState(ALL_VALUE);
   const [niche, setNiche] = useState(ALL_VALUE);
-  const [domain, setDomain] = useState(ALL_VALUE);
-  const [recencyTag, setRecencyTag] = useState(ALL_VALUE);
+  const [selection, setSelection] = useState(ALL_VALUE);
+
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  const [bulkBusy, setBulkBusy] = useState("");
+  const [scrapingId, setScrapingId] = useState("");
+  const [intentBusyId, setIntentBusyId] = useState("");
+  const [intentJob, setIntentJob] = useState<{
+    jobId: string;
+    total: number;
+  } | null>(null);
+  const [intentProgress, setIntentProgress] = useState(0);
 
   const [page, setPage] = useState(1);
 
@@ -171,26 +263,15 @@ export default function BrandMapPage() {
     [brands]
   );
 
-  const domainOptions = useMemo(
-    () => getUniqueOptions(brands, (row) => row.domain || ""),
-    [brands]
-  );
-
-  const recencyOptions = useMemo(
-    () => getUniqueOptions(brands, (row) => row.recencyTag || ""),
-    [brands]
-  );
-
   const hasActiveFilters =
     Boolean(search.trim()) ||
     foundVia !== ALL_VALUE ||
     niche !== ALL_VALUE ||
-    domain !== ALL_VALUE ||
-    recencyTag !== ALL_VALUE;
+    selection !== ALL_VALUE;
 
   useEffect(() => {
     setPage(1);
-  }, [search, foundVia, niche, domain, recencyTag]);
+  }, [search, foundVia, niche, selection]);
 
   const filteredBrands = useMemo(() => {
     const query = search.trim().toLowerCase();
@@ -201,24 +282,17 @@ export default function BrandMapPage() {
       const matchesFoundVia =
         foundVia === ALL_VALUE || clean(brand.foundVia) === foundVia;
 
-      const matchesNiche =
-        niche === ALL_VALUE || clean(brand.niche) === niche;
+      const matchesNiche = niche === ALL_VALUE || clean(brand.niche) === niche;
 
-      const matchesDomain =
-        domain === ALL_VALUE || clean(brand.domain) === domain;
-
-      const matchesRecency =
-        recencyTag === ALL_VALUE || clean(brand.recencyTag) === recencyTag;
+      const matchesSelection =
+        selection === ALL_VALUE ||
+        getSelectionStatus(brand) === selection.toLowerCase();
 
       return (
-        matchesSearch &&
-        matchesFoundVia &&
-        matchesNiche &&
-        matchesDomain &&
-        matchesRecency
+        matchesSearch && matchesFoundVia && matchesNiche && matchesSelection
       );
     });
-  }, [brands, search, foundVia, niche, domain, recencyTag]);
+  }, [brands, search, foundVia, niche, selection]);
 
   const visibleBrands = useMemo(() => {
     return filteredBrands.slice(0, page * PAGE_SIZE);
@@ -226,67 +300,393 @@ export default function BrandMapPage() {
 
   const totalPages = Math.max(1, Math.ceil(filteredBrands.length / PAGE_SIZE));
 
-  function clearFilters() {
-    setSearch("");
-    setFoundVia(ALL_VALUE);
-    setNiche(ALL_VALUE);
-    setDomain(ALL_VALUE);
-    setRecencyTag(ALL_VALUE);
-    setPage(1);
+  const filteredIds = useMemo(
+    () => filteredBrands.map((row) => clean(row._id)).filter(Boolean),
+    [filteredBrands]
+  );
+
+  const allFilteredSelected =
+    filteredIds.length > 0 &&
+    filteredIds.every((id) => selectedIds.has(id));
+
+  function toggleRow(id: string) {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+
+      if (next.has(id)) {
+        next.delete(id);
+      } else {
+        next.add(id);
+      }
+
+      return next;
+    });
+  }
+
+  function toggleAllFiltered() {
+    setSelectedIds((prev) => {
+      if (allFilteredSelected) {
+        const next = new Set(prev);
+        filteredIds.forEach((id) => next.delete(id));
+        return next;
+      }
+
+      return new Set([...prev, ...filteredIds]);
+    });
+  }
+
+  function clearSelection() {
+    setSelectedIds(new Set());
+  }
+
+  async function runBulkAction(action: "approve" | "exclude" | "reset") {
+    const ids = Array.from(selectedIds);
+
+    if (ids.length === 0) return;
+
+    if (
+      action === "exclude" &&
+      !window.confirm(
+        `Exclude ${ids.length} brand(s)? They move to the Exclude list and will be skipped in all future crawls.`
+      )
+    ) {
+      return;
+    }
+
+    setBulkBusy(action);
+    setNotice(null);
+
+    let updated = 0;
+    let failed = "";
+
+    for (const chunk of chunkArray(ids, BULK_CHUNK_SIZE)) {
+      const response: any = await apiPost("/brand-map/bulk-select", {
+        ids: chunk,
+        action,
+      });
+
+      if (response?.success) {
+        updated += Number(response.updated || 0);
+      } else {
+        failed = response?.message || "Bulk action failed.";
+        break;
+      }
+    }
+
+    if (failed) {
+      setNotice({ type: "error", text: failed });
+    } else {
+      setNotice({
+        type: "success",
+        text:
+          action === "exclude"
+            ? `${updated} brand(s) excluded and added to the Exclude list.`
+            : action === "approve"
+              ? `${updated} brand(s) approved.`
+              : `${updated} brand(s) reset to pending.`,
+      });
+      clearSelection();
+      await loadBrands();
+    }
+
+    setBulkBusy("");
+  }
+
+  async function sendSelectedToCampaign() {
+    const ids = Array.from(selectedIds);
+
+    if (ids.length === 0) return;
+
+    if (
+      !window.confirm(
+        `Send ${ids.length} brand(s) to campaign? Email discovery, verification and Instantly export will run for these brands only.`
+      )
+    ) {
+      return;
+    }
+
+    setBulkBusy("send");
+    setNotice(null);
+
+    let queued = 0;
+    let rejected = 0;
+    let failed = "";
+
+    for (const chunk of chunkArray(ids, PROCESS_CHUNK_SIZE)) {
+      const response: any = await apiPost("/brand-map/process-selected", {
+        brandMapIds: chunk,
+      });
+
+      if (response?.success) {
+        queued += Number(response.queued || 0);
+        rejected += Array.isArray(response.rejected)
+          ? response.rejected.length
+          : 0;
+      } else {
+        failed = response?.message || "Failed to queue selected brands.";
+        break;
+      }
+    }
+
+    if (failed) {
+      setNotice({ type: "error", text: failed });
+    } else {
+      setNotice({
+        type: "success",
+        text:
+          `${queued} brand(s) queued for campaign processing.` +
+          (rejected ? ` ${rejected} excluded brand(s) were skipped.` : "") +
+          " Track progress on the Control Panel.",
+      });
+      clearSelection();
+      await loadBrands();
+    }
+
+    setBulkBusy("");
+  }
+
+  async function findIntent(row: BrandMapRow) {
+    const id = clean(row._id);
+
+    if (!id) return;
+
+    setIntentBusyId(id);
+    setNotice(null);
+
+    setBrands((prev) =>
+      prev.map((brand) =>
+        clean(brand._id) === id ? { ...brand, intentStatus: "running" } : brand
+      )
+    );
+
+    const response: any = await apiPost(`/brand-map/${id}/intent`, {});
+
+    if (response?.success && response.data) {
+      setBrands((prev) =>
+        prev.map((brand) =>
+          clean(brand._id) === id ? { ...brand, ...response.data } : brand
+        )
+      );
+
+      if (response.cached) {
+        setNotice({
+          type: "success",
+          text: `${row.brandName || "Brand"}: using a recent intent score (rescans are cached for a few days).`,
+        });
+      }
+    } else {
+      setBrands((prev) =>
+        prev.map((brand) =>
+          clean(brand._id) === id ? { ...brand, intentStatus: "failed" } : brand
+        )
+      );
+      setNotice({
+        type: "error",
+        text: response?.message || "Intent scan failed.",
+      });
+    }
+
+    setIntentBusyId("");
+  }
+
+  async function findIntentForSelected() {
+    const ids = Array.from(selectedIds).slice(0, 50);
+
+    if (ids.length === 0) return;
+
+    if (selectedIds.size > 50) {
+      setNotice({
+        type: "error",
+        text: "Intent scans run at most 50 brands per batch — the first 50 selected will be scanned.",
+      });
+    }
+
+    setBulkBusy("intent");
+
+    const response: any = await apiPost("/brand-map/intent-bulk", { ids });
+
+    if (response?.success) {
+      if (Number(response.queued || 0) === 0) {
+        setNotice({
+          type: "success",
+          text: "All selected brands already have a recent intent score.",
+        });
+        setBulkBusy("");
+        return;
+      }
+
+      setIntentJob({ jobId: response.jobId, total: Number(response.queued) });
+      setIntentProgress(0);
+      setNotice({
+        type: "success",
+        text: `Intent scan started for ${response.queued} brand(s)… this runs one brand at a time.`,
+      });
+    } else {
+      setNotice({
+        type: "error",
+        text: response?.message || "Failed to start intent scans.",
+      });
+      setBulkBusy("");
+    }
+  }
+
+  useEffect(() => {
+    if (!intentJob) return;
+
+    const timer = window.setInterval(async () => {
+      const status: any = await apiGet(`/brand-map/intent-bulk/${intentJob.jobId}`);
+
+      if (!status?.success) {
+        window.clearInterval(timer);
+        setIntentJob(null);
+        setBulkBusy("");
+        return;
+      }
+
+      setIntentProgress(Number(status.processed || 0) + Number(status.failed || 0));
+
+      if (status.done) {
+        window.clearInterval(timer);
+        setIntentJob(null);
+        setBulkBusy("");
+        setNotice({
+          type: "success",
+          text: `Intent scan finished: ${status.processed} scored${
+            status.failed ? `, ${status.failed} failed` : ""
+          }.`,
+        });
+        await loadBrands();
+      }
+    }, 3000);
+
+    return () => window.clearInterval(timer);
+  }, [intentJob]);
+
+  async function runScrape(row: BrandMapRow) {
+    const id = clean(row._id);
+
+    if (!id) return;
+
+    setScrapingId(id);
+    setNotice(null);
+
+    const response: any = await apiPost(`/brand-map/${id}/scrape`, {});
+
+    if (response?.success) {
+      setNotice({
+        type: "success",
+        text: `Website scrape queued for ${row.brandName || "brand"}. Results appear in Email Discovery.`,
+      });
+    } else {
+      setNotice({
+        type: "error",
+        text: response?.message || "Failed to queue website scrape.",
+      });
+    }
+
+    setScrapingId("");
   }
 
   const columns = useMemo<AdminTableColumn<BrandMapRow>[]>(
     () => [
       {
-        id: "index",
-        header: "#",
-        align: "center",
-        widthClassName: "min-w-[70px]",
-        render: (_brand, index) => (
-          <span className="text-sm font-semibold text-slate-500">
-            {index + 1}
-          </span>
+        id: "select",
+        header: (
+          <input
+            type="checkbox"
+            checked={allFilteredSelected}
+            onChange={toggleAllFiltered}
+            className="h-4 w-4 rounded border-slate-300"
+            title="Select all filtered brands"
+          />
         ),
+        align: "center",
+        widthClassName: "w-[46px]",
+        render: (brand) => {
+          const id = clean(brand._id);
+
+          return (
+            <input
+              type="checkbox"
+              checked={selectedIds.has(id)}
+              onChange={() => toggleRow(id)}
+              className="h-4 w-4 rounded border-slate-300"
+            />
+          );
+        },
       },
       {
         id: "brandName",
-        header: "Brand Name",
-        widthClassName: "min-w-[220px]",
-        render: (brand) => (
-          <span className="font-semibold text-slate-950">
-            {brand.brandName || "-"}
-          </span>
-        ),
+        header: "Brand",
+        widthClassName: "min-w-[230px]",
+        render: (brand) => {
+          const domain = clean(brand.domain);
+          const domainUrl = getDomainUrl(domain);
+
+          return (
+            <div className="min-w-0 space-y-0.5">
+              <p className="font-semibold text-slate-950">
+                {brand.brandName || "-"}
+              </p>
+
+              {domain ? (
+                <a
+                  href={domainUrl}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="block truncate text-xs font-medium !text-blue-600 hover:!text-blue-700"
+                >
+                  {domain}
+                </a>
+              ) : (
+                <span className="block text-xs font-medium text-slate-400">
+                  no domain
+                </span>
+              )}
+            </div>
+          );
+        },
+      },
+      {
+        id: "selectionStatus",
+        header: "Status",
+        align: "center",
+        widthClassName: "min-w-[110px]",
+        render: (brand) => <SelectionBadge row={brand} />,
       },
       {
         id: "foundVia",
         header: "Found Via",
-        widthClassName: "min-w-[160px]",
+        widthClassName: "min-w-[140px]",
         render: (brand) => brand.foundVia || "-",
+      },
+      {
+        id: "niche",
+        header: "Niche",
+        widthClassName: "min-w-[150px]",
+        render: (brand) => brand.niche || "-",
       },
       {
         id: "channelCount",
         header: "Channels",
         align: "center",
-        widthClassName: "min-w-[110px]",
-        render: (brand) => (
-          <Badge variant="secondary">{brand.channelCount || 0}</Badge>
-        ),
-      },
-      {
-        id: "channelNames",
-        header: "Channel Names",
-        widthClassName: "min-w-[360px]",
-        render: (brand) => (
-          <p className="whitespace-normal text-sm leading-6 text-slate-600">
-            {getChannelNames(brand)}
-          </p>
-        ),
+        widthClassName: "min-w-[100px]",
+        render: (brand) => {
+          const names = Array.isArray(brand.channelNames)
+            ? brand.channelNames.filter(Boolean)
+            : [];
+
+          return (
+            <span title={names.join("\n") || "No channel details"}>
+              <Badge variant="secondary">{brand.channelCount || 0}</Badge>
+            </span>
+          );
+        },
       },
       {
         id: "mostRecentSponsorshipDate",
-        header: "Recent Sponsorship",
-        widthClassName: "min-w-[180px]",
+        header: "Last Sponsorship",
+        widthClassName: "min-w-[150px]",
         render: (brand) => formatDate(brand.mostRecentSponsorshipDate),
       },
       {
@@ -296,35 +696,60 @@ export default function BrandMapPage() {
         render: (brand) => <RecencyBadge value={brand.recencyTag} />,
       },
       {
-        id: "niche",
-        header: "Niche",
-        widthClassName: "min-w-[180px]",
-        render: (brand) => brand.niche || "-",
+        id: "intent",
+        header: "Intent",
+        align: "center",
+        widthClassName: "min-w-[120px]",
+        render: (brand) => <IntentBadge row={brand} />,
       },
       {
-        id: "domain",
-        header: "Domain",
-        widthClassName: "min-w-[220px]",
+        id: "actions",
+        header: "Actions",
+        align: "center",
+        widthClassName: "min-w-[230px]",
         render: (brand) => {
-          const domain = clean(brand.domain);
-          const domainUrl = getDomainUrl(domain);
-
-          if (!domain) return "-";
+          const id = clean(brand._id);
+          const scrapeBusy = scrapingId === id;
+          const intentBusy =
+            intentBusyId === id || brand.intentStatus === "running";
 
           return (
-            <a
-              href={domainUrl}
-              target="_blank"
-              rel="noreferrer"
-              className="font-medium !text-blue-600 !underline !underline-offset-4 !hover:text-blue-700"
-            >
-              {domain}
-            </a>
+            <div className="flex items-center justify-center gap-1.5">
+              <Button
+                type="button"
+                size="xs"
+                variant="outline"
+                disabled={scrapeBusy || !clean(brand.domain)}
+                title={
+                  clean(brand.domain)
+                    ? "Scrape the brand website and socials for emails (free, no paid credits)"
+                    : "No domain to scrape"
+                }
+                onClick={() => runScrape(brand)}
+                className="h-8 rounded-md"
+              >
+                <Globe className="mr-1.5 h-3.5 w-3.5" />
+                {scrapeBusy ? "Queuing..." : "Scrape"}
+              </Button>
+
+              <Button
+                type="button"
+                size="xs"
+                variant="outline"
+                disabled={intentBusy}
+                title="Scan recent public activity and score how likely this brand is to buy influencer outreach now"
+                onClick={() => findIntent(brand)}
+                className="h-8 rounded-md !border-violet-200 !text-violet-700 hover:!bg-violet-50"
+              >
+                <Sparkles className="mr-1.5 h-3.5 w-3.5" />
+                {intentBusy ? "Scanning..." : "Find Intent"}
+              </Button>
+            </div>
           );
         },
       },
     ],
-    []
+    [allFilteredSelected, selectedIds, scrapingId, intentBusyId, filteredIds]
   );
 
   return (
@@ -336,7 +761,8 @@ export default function BrandMapPage() {
           </h1>
 
           <p className="mt-1 text-sm font-medium text-slate-500">
-            Brand Map records discovered from raw video analysis.
+            Review discovered brands, then send the good ones to campaign or
+            exclude the noise.
           </p>
         </div>
         <Button
@@ -353,13 +779,27 @@ export default function BrandMapPage() {
         </Button>
       </div>
 
+      {notice ? <Notice type={notice.type} text={notice.text} /> : null}
+
       <section className="space-y-3">
-        <div className="grid gap-3 rounded-2xl border border-slate-200 bg-white p-4 shadow-sm xl:grid-cols-[1.5fr_1fr_1fr_1fr_1fr_auto] xl:items-end">
+        <div className="grid gap-3 rounded-2xl border border-slate-200 bg-white p-4 shadow-sm xl:grid-cols-[1.5fr_1fr_1fr_1fr] xl:items-end">
           <FilterSearchInput
             label="Search"
             value={search}
             onChange={setSearch}
             placeholder="Search brand, channel, niche, domain..."
+          />
+
+          <FilterSelect
+            label="Status"
+            value={selection}
+            onChange={setSelection}
+            options={[
+              { label: ALL_VALUE, value: ALL_VALUE },
+              { label: "Pending", value: "pending" },
+              { label: "Approved", value: "approved" },
+              { label: "Excluded", value: "excluded" },
+            ]}
           />
 
           <FilterSelect
@@ -376,8 +816,80 @@ export default function BrandMapPage() {
             options={toOptions(foundViaOptions)}
           />
         </div>
-
       </section>
+
+      {selectedIds.size > 0 ? (
+        <div className="sticky top-2 z-10 flex flex-wrap items-center gap-3 rounded-2xl border border-blue-200 bg-blue-50/95 px-4 py-3 shadow-sm backdrop-blur">
+          <span className="text-sm font-semibold text-blue-900">
+            {selectedIds.size} brand(s) selected
+          </span>
+
+          <div className="flex flex-wrap items-center gap-2">
+            <Button
+              type="button"
+              size="sm"
+              disabled={Boolean(bulkBusy)}
+              onClick={sendSelectedToCampaign}
+              className="h-9 rounded-md bg-blue-600 text-white hover:bg-blue-700"
+            >
+              <Send className="mr-1.5 h-3.5 w-3.5" />
+              {bulkBusy === "send" ? "Queuing..." : "Send Selected to Campaign"}
+            </Button>
+
+            <Button
+              type="button"
+              size="sm"
+              variant="outline"
+              disabled={Boolean(bulkBusy)}
+              onClick={() => runBulkAction("exclude")}
+              className="h-9 rounded-md !border-rose-200 !text-rose-700 hover:!bg-rose-50"
+            >
+              <Ban className="mr-1.5 h-3.5 w-3.5" />
+              {bulkBusy === "exclude" ? "Excluding..." : "Exclude Selected"}
+            </Button>
+
+            <Button
+              type="button"
+              size="sm"
+              variant="outline"
+              disabled={Boolean(bulkBusy)}
+              onClick={() => runBulkAction("reset")}
+              className="h-9 rounded-md"
+            >
+              <RotateCcw className="mr-1.5 h-3.5 w-3.5" />
+              {bulkBusy === "reset" ? "Resetting..." : "Reset to Pending"}
+            </Button>
+
+            <Button
+              type="button"
+              size="sm"
+              variant="outline"
+              disabled={Boolean(bulkBusy)}
+              onClick={findIntentForSelected}
+              className="h-9 rounded-md !border-violet-200 !text-violet-700 hover:!bg-violet-50"
+            >
+              <Sparkles className="mr-1.5 h-3.5 w-3.5" />
+              {bulkBusy === "intent"
+                ? intentJob
+                  ? `Scanning ${intentProgress}/${intentJob.total}...`
+                  : "Starting..."
+                : "Find Intent"}
+            </Button>
+
+            <Button
+              type="button"
+              size="sm"
+              variant="ghost"
+              disabled={Boolean(bulkBusy)}
+              onClick={clearSelection}
+              className="h-9 rounded-md text-slate-600"
+            >
+              <X className="mr-1.5 h-3.5 w-3.5" />
+              Clear
+            </Button>
+          </div>
+        </div>
+      ) : null}
 
       <AdminTable
         data={visibleBrands}

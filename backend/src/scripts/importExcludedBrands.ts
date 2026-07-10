@@ -3,73 +3,15 @@ import dotenv from "dotenv";
 import path from "path";
 import fs from "fs";
 import XLSX from "xlsx";
+import { ExcludedBrand } from "../models/ExcludedBrand.model";
+import {
+  cleanText,
+  escapeRegex,
+  normalizeBrandName,
+  normalizeDomain
+} from "../utils/normalize";
 
 dotenv.config();
-
-const ExcludedBrandSchema = new mongoose.Schema(
-  {
-    brandName: {
-      type: String,
-      required: true
-    },
-    domain: {
-      type: String,
-      default: ""
-    },
-    normalizedBrandName: {
-      type: String,
-      required: true
-    },
-    normalizedDomain: {
-      type: String,
-      default: ""
-    },
-    source: {
-      type: String,
-      default: "xlsx_import"
-    }
-  },
-  { timestamps: true }
-);
-
-ExcludedBrandSchema.index(
-  {
-    normalizedBrandName: 1,
-    normalizedDomain: 1
-  },
-  {
-    unique: true
-  }
-);
-
-const ExcludedBrand: any =
-  mongoose.models.ExcludedBrand ||
-  mongoose.model("ExcludedBrand", ExcludedBrandSchema);
-
-function cleanText(value: any) {
-  return String(value || "").trim();
-}
-
-function normalizeBrandName(value: any) {
-  return cleanText(value)
-    .toLowerCase()
-    .replace(/\s+/g, " ")
-    .trim();
-}
-
-function normalizeDomain(value: any) {
-  return cleanText(value)
-    .toLowerCase()
-    .replace(/^https?:\/\//, "")
-    .replace(/^www\./, "")
-    .split("/")[0]
-    .split("?")[0]
-    .trim();
-}
-
-function escapeRegex(value: string) {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
 
 function findColumn(row: Record<string, any>, possibleNames: string[]) {
   const keys = Object.keys(row);

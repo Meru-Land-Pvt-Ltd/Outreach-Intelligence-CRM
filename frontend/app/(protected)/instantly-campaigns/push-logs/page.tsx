@@ -1,3 +1,6 @@
+"use client";
+
+import { useEffect, useState } from "react";
 import { apiGet } from "@/lib/api";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -10,9 +13,30 @@ import {
   TableRow
 } from "@/components/ui/table";
 
-export default async function PushLogsPage() {
-  const response = await apiGet("/instantly/push-logs");
-  const rows = response?.data || [];
+export default function PushLogsPage() {
+  const [rows, setRows] = useState<any[]>([]);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    let active = true;
+
+    async function loadLogs() {
+      const response = await apiGet("/instantly/push-logs");
+
+      if (!active) {
+        return;
+      }
+
+      setRows(response?.data || []);
+      setLoading(false);
+    }
+
+    loadLogs();
+
+    return () => {
+      active = false;
+    };
+  }, []);
 
   return (
     <Card>
@@ -52,7 +76,7 @@ export default async function PushLogsPage() {
             {rows.length === 0 ? (
               <TableRow>
                 <TableCell colSpan={6} className="py-10 text-center text-slate-500">
-                  No push logs yet.
+                  {loading ? "Loading push logs…" : "No push logs yet."}
                 </TableCell>
               </TableRow>
             ) : null}

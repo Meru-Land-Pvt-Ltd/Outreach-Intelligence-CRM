@@ -8,6 +8,72 @@ import { InstantlyTemplate } from "../models/InstantlyTemplate.model";
 import { InstantlyCampaign } from "../models/InstantlyCampaign.model";
 import { PushLog } from "../models/PushLog.model";
 import { BounceEvent } from "../models/BounceEvent.model";
+import { safeEqual } from "./auth.controller";
+import { getAppSettings } from "./settings.controller";
+
+const ROLE_TIER_PATTERNS: Array<{ tier: number; pattern: RegExp }> = [
+  {
+    tier: 1,
+    pattern: /founder|co-?founder|ceo|chief executive|owner|president/i
+  },
+  {
+    tier: 2,
+    pattern:
+      /cmo|marketing|partnership|collab|influencer|brand|public relations|\bpr\b|growth|social media/i
+  },
+  {
+    tier: 3,
+    pattern: /sales|business development|\bbd\b|bizdev|account/i
+  }
+];
+
+const GENERIC_MAILBOX_REGEX =
+  /^(info|hello|contact|contactus|support|team|admin|office|mail|enquiries|inquiries|sales|marketing|media|press|partnerships?)@/i;
+
+// Pick the best N contacts of a brand: verified first, then by role priority
+// (decision makers > marketing/partnerships > sales > generic mailboxes >
+// unknown roles), then oldest first. Used to cap outreach per brand.
+function selectTopContacts(contacts: any[], cap: number) {
+  if (!Number.isFinite(cap) || cap <= 0 || contacts.length <= cap) {
+    return contacts;
+  }
+
+  const scored = contacts.map((contact: any, index: number) => {
+    const email = String(contact.email || "").trim().toLowerCase();
+    const roleText =
+      String(contact.designation || contact.role || "").trim() +
+      " " +
+      email.split("@")[0];
+
+    let tier = 5;
+
+    for (const { tier: candidateTier, pattern } of ROLE_TIER_PATTERNS) {
+      if (pattern.test(roleText)) {
+        tier = candidateTier;
+        break;
+      }
+    }
+
+    if (tier === 5 && GENERIC_MAILBOX_REGEX.test(email)) {
+      tier = 4;
+    }
+
+    const verifiedRank =
+      String(contact.verificationStatus || "").trim() === "Ok" ||
+      String(contact.status || "").trim() === "verified"
+        ? 0
+        : 1;
+
+    return { contact, verifiedRank, tier, index };
+  });
+
+  scored.sort(
+    (a, b) =>
+      a.verifiedRank - b.verifiedRank || a.tier - b.tier || a.index - b.index
+  );
+
+  return scored.slice(0, cap).map((item) => item.contact);
+}
 
 const ContactModel = Contact as any;
 const BrandMapModel = BrandMap as any;
@@ -982,7 +1048,67 @@ async function getEligibleLeads(input: {
   channel: string;
   numLeads: number;
   usedEmails?: Record<string, boolean>;
+  niche?: string;
 }) {
+  const settings = await getAppSettings();
+  const perBrandCap = Math.max(1, Number(settings.maxEmailsPerBrand) || 4);
+
+  // Optional niche scoping: only leads whose brand belongs to the niche.
+  const nicheFilter = cleanText(input.niche);
+  let nicheCompanies: Set<string> | null = null;
+
+  if (nicheFilter) {
+    nicheCompanies = new Set(
+      (
+        await BrandMapModel.find({ niche: nicheFilter }, { brandName: 1 }).lean()
+      )
+        .map((row: any) => cleanText(row.brandName).toLowerCase())
+        .filter(Boolean)
+    );
+  }
+
+  // Brands excluded in the Brand Map must never be pushed, even if legacy
+  // leads for them are already staged.
+  const excludedCompanies = new Set<string>(
+    (
+      await BrandMapModel.find(
+        { $or: [{ selectionStatus: "excluded" }, { isExcluded: true }] },
+        { brandName: 1 }
+      ).lean()
+    )
+      .map((row: any) => cleanText(row.brandName).toLowerCase())
+      .filter(Boolean)
+  );
+
+  // Per-brand cap counts everything already pushed on this channel, so the
+  // limit holds across campaigns — including the legacy staged backlog.
+  const pushedCounts: Record<string, number> = {};
+
+  const pushedAgg = await InstantlyLeadModel.aggregate([
+    {
+      $match: {
+        channel: input.channel,
+        pushedStatus: { $nin: ["", null] }
+      }
+    },
+    {
+      $group: {
+        _id: "$companyName",
+        count: { $sum: 1 }
+      }
+    }
+  ]);
+
+  for (const item of pushedAgg) {
+    const key = cleanText(item._id).toLowerCase();
+
+    if (key) {
+      pushedCounts[key] = Number(item.count || 0);
+    }
+  }
+
+  const selectedThisRun: Record<string, number> = {};
+
   const rows = await InstantlyLeadModel.find({
     channel: input.channel,
     email: { $exists: true, $nin: ["", null] },
@@ -1001,6 +1127,22 @@ async function getEligibleLeads(input: {
 
     if (!email) continue;
     if (input.usedEmails && input.usedEmails[email]) continue;
+
+    const companyKey = cleanText(row.companyName).toLowerCase();
+
+    if (companyKey && excludedCompanies.has(companyKey)) continue;
+
+    if (nicheCompanies && (!companyKey || !nicheCompanies.has(companyKey))) {
+      continue;
+    }
+
+    if (
+      companyKey &&
+      (pushedCounts[companyKey] || 0) + (selectedThisRun[companyKey] || 0) >=
+        perBrandCap
+    ) {
+      continue;
+    }
 
     let verificationStatus = cleanText(row.verificationStatus);
 
@@ -1073,12 +1215,136 @@ async function getEligibleLeads(input: {
     leadsToPush.push(row);
     leadIds.push(row._id);
 
+    if (companyKey) {
+      selectedThisRun[companyKey] = (selectedThisRun[companyKey] || 0) + 1;
+    }
+
     if (input.usedEmails) {
       input.usedEmails[email] = true;
     }
   }
 
   return { leadsToPush, leadIds };
+}
+
+// Instantly has no campaign folders; custom tags are the grouping mechanism.
+// Tag label → id cache lives for the process lifetime.
+const instantlyTagCache: Record<string, string> = {};
+
+async function ensureInstantlyTag(label: string): Promise<string> {
+  const cleanLabel = cleanText(label);
+
+  if (!cleanLabel) return "";
+
+  const cacheKey = cleanLabel.toLowerCase();
+
+  if (instantlyTagCache[cacheKey]) {
+    return instantlyTagCache[cacheKey];
+  }
+
+  const listResp = await instantlyApiCall(
+    "GET",
+    "/custom-tags?search=" + encodeURIComponent(cleanLabel) + "&limit=100"
+  );
+
+  const items = Array.isArray(listResp?.items)
+    ? listResp.items
+    : Array.isArray(listResp)
+      ? listResp
+      : [];
+
+  const existing = items.find(
+    (item: any) => cleanText(item.label).toLowerCase() === cacheKey
+  );
+
+  if (existing?.id) {
+    instantlyTagCache[cacheKey] = String(existing.id);
+    return instantlyTagCache[cacheKey];
+  }
+
+  const createResp = await instantlyApiCall("POST", "/custom-tags", {
+    label: cleanLabel,
+    description: "Niche tag (auto-created by Outreach CRM)"
+  });
+
+  const tagId = String(createResp?.id || "");
+
+  if (tagId) {
+    instantlyTagCache[cacheKey] = tagId;
+  }
+
+  return tagId;
+}
+
+async function deriveNichesFromLeads(leads: any[], explicitNiche?: string) {
+  const niches: string[] = [];
+  const explicit = cleanText(explicitNiche);
+
+  if (explicit) {
+    niches.push(explicit);
+  }
+
+  const brandMapIds = Array.from(
+    new Set(
+      leads
+        .map((lead: any) => String(lead.brandMapId || ""))
+        .filter((id: string) => id && id !== "null" && id !== "undefined")
+    )
+  );
+
+  if (brandMapIds.length > 0) {
+    const brandRows = await BrandMapModel.find(
+      { _id: { $in: brandMapIds } },
+      { niche: 1 }
+    ).lean();
+
+    const counts = new Map<string, number>();
+
+    for (const row of brandRows as any[]) {
+      const niche = cleanText(row.niche);
+
+      if (!niche || niche === "-" || niche.toLowerCase() === "n/a") continue;
+
+      counts.set(niche, (counts.get(niche) || 0) + 1);
+    }
+
+    const ranked = Array.from(counts.entries())
+      .sort((a, b) => b[1] - a[1])
+      .map(([niche]) => niche);
+
+    for (const niche of ranked) {
+      if (!niches.some((item) => item.toLowerCase() === niche.toLowerCase())) {
+        niches.push(niche);
+      }
+    }
+  }
+
+  return niches;
+}
+
+async function assignNicheTagsToCampaign(campaignId: string, niches: string[]) {
+  const tagIds: string[] = [];
+
+  for (const niche of niches.slice(0, 3)) {
+    const tagId = await ensureInstantlyTag(niche);
+
+    if (tagId) {
+      tagIds.push(tagId);
+    }
+  }
+
+  if (tagIds.length === 0) {
+    return tagIds;
+  }
+
+  await instantlyApiCall("POST", "/custom-tags/toggle-resource", {
+    tag_ids: tagIds,
+    resource_type: 2,
+    resource_ids: [campaignId],
+    assign: true
+  });
+
+  return tagIds;
 }
 
 async function createAndPushCampaign(input: {
@@ -1092,6 +1358,7 @@ async function createAndPushCampaign(input: {
   dailyLimit: number;
   selectedSenders?: any[];
   usedEmails?: Record<string, boolean>;
+  niche?: string;
 }) {
   await ensureTemplates();
 
@@ -1124,7 +1391,8 @@ async function createAndPushCampaign(input: {
   const { leadsToPush, leadIds } = await getEligibleLeads({
     channel: input.channel,
     numLeads: input.numLeads,
-    usedEmails: input.usedEmails
+    usedEmails: input.usedEmails,
+    niche: input.niche
   });
 
   if (leadsToPush.length === 0) {
@@ -1176,6 +1444,7 @@ async function createAndPushCampaign(input: {
     await InstantlyLeadModel.findByIdAndUpdate(leadIds[i], {
       $set: {
         pushedStatus: pushedLabel,
+        pushedAt,
         campaignId
       }
     });
@@ -1185,6 +1454,7 @@ async function createAndPushCampaign(input: {
       {
         $set: {
           status: "pushed",
+          pushedAt,
           instantlyCampaignId: campaignId
         }
       }
@@ -1201,6 +1471,20 @@ async function createAndPushCampaign(input: {
   await instantlyApiCall("POST", "/campaigns/" + campaignId + "/activate", {});
   activatedAt = new Date();
 
+  // Niche tagging groups campaigns in Instantly. A tag failure must never
+  // fail the push — leads are already in the campaign by this point.
+  let campaignNiches: string[] = [];
+  let campaignTagIds: string[] = [];
+  let tagError = "";
+
+  try {
+    campaignNiches = await deriveNichesFromLeads(leadsToPush, input.niche);
+    campaignTagIds = await assignNicheTagsToCampaign(campaignId, campaignNiches);
+  } catch (error: any) {
+    tagError = cleanText(error?.message || String(error));
+    console.error("Niche tag assignment failed (push unaffected):", tagError);
+  }
+
   await InstantlyCampaignModel.create({
     channel: input.channel,
     campaignName: input.campaignName,
@@ -1216,6 +1500,10 @@ async function createAndPushCampaign(input: {
     status: activatedAt ? campaignLaunchStatus : "created",
     pushedAt,
     activatedAt,
+    niche: campaignNiches[0] || "",
+    niches: campaignNiches,
+    tagIds: campaignTagIds,
+    tagError,
     raw: {
       createResp,
       payload
@@ -2170,10 +2458,26 @@ export function scheduleInstantlyBackendMaintenance(input: {
 
 async function runInstantlyExportNow(input: { brandName?: string; jobId?: string } = {}) {
   const brandNameFilter = cleanText(input.brandName);
+  const settings = await getAppSettings();
 
-  const brandMaps = await BrandMapModel.find(
-    brandNameFilter ? { brandName: brandNameFilter } : {}
-  ).sort({ createdAt: -1 });
+  const brandMapQuery: Record<string, any> = {
+    isExcluded: { $ne: true },
+    selectionStatus: { $ne: "excluded" }
+  };
+
+  // Manual mode: export only stages brands that were approved in the
+  // Brand Map, instead of vacuuming every brand ever discovered.
+  if (settings.manualSelectionMode) {
+    brandMapQuery.selectionStatus = "approved";
+  }
+
+  if (brandNameFilter) {
+    brandMapQuery.brandName = brandNameFilter;
+  }
+
+  const brandMaps = await BrandMapModel.find(brandMapQuery).sort({
+    createdAt: -1
+  });
 
   updateExportJobProgress(
     input.jobId,
@@ -2223,13 +2527,18 @@ async function runInstantlyExportNow(input: { brandName?: string; jobId?: string
       `Preparing ${brandName} (${brandIndex + 1}/${brandMaps.length})...`
     );
 
-    const contacts = await ContactModel.find({
+    const allBrandContacts = await ContactModel.find({
       brandName,
       domain,
       email: { $exists: true, $nin: ["", null] },
       status: { $nin: ["invalid", "bounced", "skipped"] },
       verificationStatus: { $nin: ["Invalid", "invalid", "bounced", "Disposable", "disposable"] }
     }).sort({ createdAt: 1 });
+
+    const contacts = selectTopContacts(
+      allBrandContacts,
+      settings.maxEmailsPerBrand
+    );
 
     const productName = getProductNameFromBrandMap(brandMap);
 
@@ -2683,7 +2992,8 @@ export async function pushToInstantly(req: Request, res: Response) {
       startTime,
       endTime,
       dailyLimit,
-      selectedSenders
+      selectedSenders,
+      niche: cleanText(req.body.niche)
     });
 
     res.json({
@@ -2740,6 +3050,7 @@ export async function batchPushCampaigns(req: Request, res: Response) {
     const cfg = getChannelConfig(channel, selectedSenders);
     const dates = weekdayDates(startDate, numWeekdays);
     const usedEmails: Record<string, boolean> = {};
+    const niche = cleanText(req.body.niche);
 
     let createdCampaigns = 0;
     let totalPushed = 0;
@@ -2748,7 +3059,9 @@ export async function batchPushCampaigns(req: Request, res: Response) {
     for (const date of dates) {
       const dateStr = formatCampaignDate(date);
       const dayLabel = formatDayLabel(date);
-      const campaignName = dayLabel + " (" + cfg.brandShort + ")";
+      const campaignName = niche
+        ? dayLabel + " - " + niche + " (" + cfg.brandShort + ")"
+        : dayLabel + " (" + cfg.brandShort + ")";
 
       const result = await createAndPushCampaign({
         channel,
@@ -2760,7 +3073,8 @@ export async function batchPushCampaigns(req: Request, res: Response) {
         endTime,
         dailyLimit,
         selectedSenders,
-        usedEmails
+        usedEmails,
+        niche
       });
 
       createdCampaigns += 1;
@@ -2900,6 +3214,28 @@ export async function pullBouncedFromInstantly(req: Request, res: Response) {
 
 export async function instantlyWebhook(req: Request, res: Response) {
   try {
+    const expectedSecret = String(
+      process.env.INSTANTLY_WEBHOOK_SECRET || ""
+    ).trim();
+
+    if (!expectedSecret) {
+      return res.status(503).json({
+        success: false,
+        message: "INSTANTLY_WEBHOOK_SECRET is not configured."
+      });
+    }
+
+    const providedSecret = String(
+      req.query?.secret || req.headers["x-webhook-secret"] || ""
+    ).trim();
+
+    if (!providedSecret || !safeEqual(providedSecret, expectedSecret)) {
+      return res.status(401).json({
+        success: false,
+        message: "Invalid webhook secret."
+      });
+    }
+
     const payload = req.body || {};
     const eventType = String(
       payload.event_type || payload.type || payload.event || ""
@@ -2951,6 +3287,206 @@ export async function instantlyWebhook(req: Request, res: Response) {
     res.json({
       success: true,
       received: true
+    });
+  } catch (error: any) {
+    res.status(500).json({
+      success: false,
+      message: error.message
+    });
+  }
+}
+
+// Cooling-off: release leads pushed long enough ago so their brands can be
+// re-pitched. Defaults to a dry run; the cutoff can never be younger than
+// the coolingOffMonths setting. Bounced leads stay locked forever.
+export async function releasePushedLeads(req: Request, res: Response) {
+  try {
+    const settings = await getAppSettings();
+
+    const dryRun = req.body?.dryRun !== false;
+    const channel = cleanText(req.body?.channel);
+    const month = cleanText(req.body?.month);
+
+    const requestedMonths = Number(req.body?.olderThanMonths);
+    const effectiveMonths = Math.max(
+      Number.isFinite(requestedMonths) && requestedMonths > 0
+        ? Math.round(requestedMonths)
+        : settings.coolingOffMonths,
+      settings.coolingOffMonths
+    );
+
+    const cutoff = new Date();
+    cutoff.setMonth(cutoff.getMonth() - effectiveMonths);
+
+    const query: Record<string, any> = {
+      pushedStatus: { $nin: ["", null] },
+      pushedAt: { $lte: cutoff },
+      instantlyBounced: { $in: ["", null] }
+    };
+
+    if (channel) {
+      query.channel = channel;
+    }
+
+    if (month) {
+      if (!/^\d{4}-\d{2}$/.test(month)) {
+        return res.status(400).json({
+          success: false,
+          message: "month must look like 2026-03"
+        });
+      }
+
+      const [year, monthNumber] = month.split("-").map(Number);
+      const monthStart = new Date(Date.UTC(year, monthNumber - 1, 1));
+      const monthEnd = new Date(Date.UTC(year, monthNumber, 1));
+
+      query.pushedAt = {
+        $gte: monthStart,
+        $lt: monthEnd < cutoff ? monthEnd : cutoff,
+        $lte: cutoff
+      };
+    }
+
+    // Rows never backfilled with pushedAt are invisible to this query;
+    // surface the count so the operator knows to run the backfill script.
+    const missingPushedAt = await InstantlyLeadModel.countDocuments({
+      pushedStatus: { $nin: ["", null] },
+      $or: [{ pushedAt: { $exists: false } }, { pushedAt: null }],
+      ...(channel ? { channel } : {})
+    });
+
+    const rows = await InstantlyLeadModel.find(query)
+      .select("email companyName channel pushedStatus pushedAt campaignId")
+      .lean();
+
+    const byCompany: Record<string, number> = {};
+    const byMonth: Record<string, number> = {};
+
+    for (const row of rows as any[]) {
+      const company = cleanText(row.companyName) || "(unknown)";
+      byCompany[company] = (byCompany[company] || 0) + 1;
+
+      const monthKey = row.pushedAt
+        ? new Date(row.pushedAt).toISOString().substring(0, 7)
+        : "(unknown)";
+      byMonth[monthKey] = (byMonth[monthKey] || 0) + 1;
+    }
+
+    if (dryRun) {
+      return res.json({
+        success: true,
+        dryRun: true,
+        eligible: rows.length,
+        cutoff,
+        effectiveMonths,
+        missingPushedAt,
+        byMonth,
+        byCompany
+      });
+    }
+
+    if (rows.length === 0) {
+      return res.json({
+        success: true,
+        dryRun: false,
+        released: 0,
+        contactsReset: 0,
+        cutoff,
+        effectiveMonths,
+        missingPushedAt
+      });
+    }
+
+    const releasedAt = new Date();
+
+    await InstantlyLeadModel.bulkWrite(
+      (rows as any[]).map((row) => ({
+        updateOne: {
+          filter: { _id: row._id },
+          update: {
+            $push: {
+              releaseHistory: {
+                releasedAt,
+                releasedBy: String((req as any).user?.email || ""),
+                previousPushedStatus: row.pushedStatus || "",
+                previousCampaignId: row.campaignId || "",
+                previousPushedAt: row.pushedAt || null
+              }
+            },
+            $set: {
+              pushedStatus: "",
+              campaignId: ""
+            },
+            $unset: {
+              pushedAt: ""
+            }
+          }
+        }
+      }))
+    );
+
+    // Only reset contacts whose email has no remaining pushed lead on any
+    // channel (the other channel may still have an active campaign).
+    const releasedEmails = Array.from(
+      new Set(
+        (rows as any[]).map((row) => cleanEmail(row.email)).filter(Boolean)
+      )
+    );
+
+    const stillPushed = new Set(
+      (
+        await InstantlyLeadModel.distinct("email", {
+          email: { $in: releasedEmails },
+          pushedStatus: { $nin: ["", null] }
+        })
+      ).map((email: any) => cleanEmail(email))
+    );
+
+    const resettableEmails = releasedEmails.filter(
+      (email) => !stillPushed.has(email)
+    );
+
+    let contactsReset = 0;
+
+    if (resettableEmails.length > 0) {
+      const verifiedResult = await ContactModel.updateMany(
+        {
+          email: { $in: resettableEmails },
+          status: "pushed",
+          verificationStatus: "Ok"
+        },
+        {
+          $set: { status: "verified" },
+          $unset: { pushedAt: "" }
+        }
+      );
+
+      const restResult = await ContactModel.updateMany(
+        {
+          email: { $in: resettableEmails },
+          status: "pushed"
+        },
+        {
+          $set: { status: "email_found" },
+          $unset: { pushedAt: "" }
+        }
+      );
+
+      contactsReset =
+        Number(verifiedResult?.modifiedCount || 0) +
+        Number(restResult?.modifiedCount || 0);
+    }
+
+    res.json({
+      success: true,
+      dryRun: false,
+      released: rows.length,
+      contactsReset,
+      cutoff,
+      effectiveMonths,
+      missingPushedAt,
+      byMonth,
+      byCompany
     });
   } catch (error: any) {
     res.status(500).json({

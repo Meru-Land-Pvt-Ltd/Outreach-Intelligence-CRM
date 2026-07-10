@@ -90,7 +90,7 @@ export function verifyAuthToken(token: string): AuthPayload | null {
   }
 }
 
-function safeEqual(a: string, b: string) {
+export function safeEqual(a: string, b: string) {
   const left = Buffer.from(a);
   const right = Buffer.from(b);
 

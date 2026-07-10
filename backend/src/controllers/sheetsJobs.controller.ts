@@ -444,10 +444,17 @@ export async function runIntelligenceJob(req: Request, res: Response) {
       }
     }
 
+    const requestedMaxBrands = Number(req.body?.maxBrands);
+    const maxBrands =
+      Number.isFinite(requestedMaxBrands) && requestedMaxBrands > 0
+        ? Math.min(Math.max(Math.round(requestedMaxBrands), 10), 500)
+        : undefined;
+
     const job = await intelligenceQueue.add(
       "run-intelligence",
       {
-        seedBrandId
+        seedBrandId,
+        ...(maxBrands ? { maxBrands } : {})
       },
       {
         attempts: 1,
@@ -478,6 +485,7 @@ export async function runIntelligenceJob(req: Request, res: Response) {
           totalFound: 0,
           message: "Crawl queued",
           startedAt: new Date(),
+          ...(maxBrands ? { maxBrands } : {}),
           raw: {
             seedBrand
           }
@@ -659,6 +667,16 @@ export async function resumeIntelligenceJob(req: Request, res: Response) {
     );
 
     await updateSeedBrandStatus(seedBrandId, nextStatus);
+
+    // A crawl paused past the hold window sits in the delayed queue;
+    // promote it so resume takes effect immediately.
+    if (state === "delayed") {
+      try {
+        await job.promote();
+      } catch {
+        // Already promoted or picked up; the worker honors JobLog status anyway.
+      }
+    }
 
     res.json({
       success: true,

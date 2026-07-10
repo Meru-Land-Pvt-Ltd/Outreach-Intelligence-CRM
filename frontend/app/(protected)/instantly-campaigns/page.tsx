@@ -323,6 +323,33 @@ function ChannelSelect({
   );
 }
 
+function NicheSelect({
+  value,
+  options,
+  onChange,
+}: {
+  value: string;
+  options: string[];
+  onChange: (value: string) => void;
+}) {
+  return (
+    <Select value={value} onValueChange={onChange}>
+      <SelectTrigger className="h-10 rounded-xl border-slate-200 bg-white text-sm font-medium shadow-none focus:ring-4 focus:ring-blue-50">
+        <SelectValue placeholder="All niches" />
+      </SelectTrigger>
+
+      <SelectContent>
+        <SelectItem value="All">All niches</SelectItem>
+        {options.map((niche) => (
+          <SelectItem key={niche} value={niche}>
+            {niche}
+          </SelectItem>
+        ))}
+      </SelectContent>
+    </Select>
+  );
+}
+
 function SenderDropdown({
   label,
   senders,
@@ -408,6 +435,197 @@ function SenderDropdown({
         </div>
       ) : null}
     </div>
+  );
+}
+
+type CoolingOffPreview = {
+  eligible: number;
+  effectiveMonths: number;
+  missingPushedAt: number;
+  byMonth: Record<string, number>;
+  byCompany: Record<string, number>;
+};
+
+function CoolingOffCard() {
+  const [months, setMonths] = useState("3");
+  const [channel, setChannel] = useState("All");
+  const [preview, setPreview] = useState<CoolingOffPreview | null>(null);
+  const [busy, setBusy] = useState("");
+  const [message, setMessage] = useState("");
+  const [messageType, setMessageType] = useState<MessageType>("info");
+
+  function buildBody(dryRun: boolean) {
+    return {
+      dryRun,
+      olderThanMonths: Number(months) || undefined,
+      ...(channel !== "All" ? { channel } : {}),
+    };
+  }
+
+  async function runPreview() {
+    setBusy("preview");
+    setMessage("");
+    setPreview(null);
+
+    const response: any = await apiPost("/instantly/release-pushed", buildBody(true));
+
+    if (response?.success) {
+      setPreview(response);
+
+      if (Number(response.missingPushedAt || 0) > 0) {
+        setMessageType("info");
+        setMessage(
+          `${response.missingPushedAt} pushed lead(s) have no push date yet — run the backfillPushedAt script to include them.`
+        );
+      }
+    } else {
+      setMessageType("error");
+      setMessage(response?.message || "Preview failed.");
+    }
+
+    setBusy("");
+  }
+
+  async function runRelease() {
+    if (!preview || preview.eligible === 0) return;
+
+    if (
+      !window.confirm(
+        `Release ${preview.eligible} lead(s) pushed more than ${preview.effectiveMonths} month(s) ago? Their brands become re-pitchable in future campaigns.`
+      )
+    ) {
+      return;
+    }
+
+    setBusy("release");
+    setMessage("");
+
+    const response: any = await apiPost("/instantly/release-pushed", buildBody(false));
+
+    if (response?.success) {
+      setMessageType("success");
+      setMessage(
+        `Released ${response.released} lead(s); ${response.contactsReset} contact(s) reset.`
+      );
+      setPreview(null);
+    } else {
+      setMessageType("error");
+      setMessage(response?.message || "Release failed.");
+    }
+
+    setBusy("");
+  }
+
+  const topCompanies = Object.entries(preview?.byCompany || {})
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 8);
+
+  return (
+    <section className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
+      <h2 className="text-base font-bold text-slate-950">Cooling-off</h2>
+      <p className="mt-1 text-sm font-medium text-slate-500">
+        Release leads pushed months ago so their brands can be re-pitched.
+        Bounced leads are never released.
+      </p>
+
+      {message ? (
+        <div className="mt-3">
+          <ActionMessage type={messageType} message={message} />
+        </div>
+      ) : null}
+
+      <div className="mt-4 flex flex-wrap items-end gap-3">
+        <label className="space-y-1.5">
+          <span className="text-xs font-semibold text-slate-600">
+            Older than (months)
+          </span>
+          <Input
+            type="number"
+            min={1}
+            max={24}
+            value={months}
+            onChange={(e) => setMonths(e.target.value)}
+            className="h-10 w-32 border-slate-200"
+          />
+        </label>
+
+        <label className="space-y-1.5">
+          <span className="text-xs font-semibold text-slate-600">Channel</span>
+          <Select value={channel} onValueChange={setChannel}>
+            <SelectTrigger className="h-10 w-56 border-slate-200">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="All">All channels</SelectItem>
+              <SelectItem value="Enoylity Technology">
+                Enoylity Technology
+              </SelectItem>
+              <SelectItem value="MHD Tech">MHD Tech</SelectItem>
+            </SelectContent>
+          </Select>
+        </label>
+
+        <Button
+          type="button"
+          variant="outline"
+          disabled={Boolean(busy)}
+          onClick={runPreview}
+          className="h-10 rounded-md"
+        >
+          {busy === "preview" ? "Checking..." : "Preview"}
+        </Button>
+
+        <Button
+          type="button"
+          disabled={Boolean(busy) || !preview || preview.eligible === 0}
+          onClick={runRelease}
+          className="h-10 rounded-md bg-blue-600 text-white hover:bg-blue-700"
+        >
+          {busy === "release"
+            ? "Releasing..."
+            : `Release${preview ? ` ${preview.eligible} lead(s)` : ""}`}
+        </Button>
+      </div>
+
+      {preview ? (
+        <div className="mt-4 rounded-xl border border-slate-200 bg-slate-50/60 p-4 text-sm">
+          <p className="font-semibold text-slate-800">
+            {preview.eligible} lead(s) eligible (pushed ≥{" "}
+            {preview.effectiveMonths} months ago)
+          </p>
+
+          {preview.eligible > 0 ? (
+            <div className="mt-2 grid gap-4 sm:grid-cols-2">
+              <div>
+                <p className="text-xs font-semibold uppercase text-slate-500">
+                  By month
+                </p>
+                <ul className="mt-1 space-y-0.5 text-slate-600">
+                  {Object.entries(preview.byMonth).map(([month, count]) => (
+                    <li key={month}>
+                      {month}: {count}
+                    </li>
+                  ))}
+                </ul>
+              </div>
+
+              <div>
+                <p className="text-xs font-semibold uppercase text-slate-500">
+                  Top brands
+                </p>
+                <ul className="mt-1 space-y-0.5 text-slate-600">
+                  {topCompanies.map(([company, count]) => (
+                    <li key={company}>
+                      {company}: {count}
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            </div>
+          ) : null}
+        </div>
+      ) : null}
+    </section>
   );
 }
 
@@ -737,6 +955,7 @@ export default function InstantlyControlPanelPage() {
     startTime: "09:00",
     endTime: "16:00",
     dailyLimit: "160",
+    niche: "All",
     selectedSenders: FALLBACK_SENDERS["Enoylity Technology"],
   });
 
@@ -748,8 +967,11 @@ export default function InstantlyControlPanelPage() {
     endTime: "16:00",
     dailyLimit: "160",
     numWeekdays: "3",
+    niche: "All",
     selectedSenders: FALLBACK_SENDERS["Enoylity Technology"],
   });
+
+  const [nicheOptions, setNicheOptions] = useState<string[]>([]);
 
   const busy = Boolean(loadingAction);
   const hasPreparedLeads = importedLeads.length > 0;
@@ -858,6 +1080,15 @@ export default function InstantlyControlPanelPage() {
     loadSenders("Enoylity Technology");
     loadSenders("MHD Tech");
     loadImportedLeads(pushForm.channel);
+
+    (async () => {
+      const response: any = await apiGet("/sheets/niche-analysis");
+      const niches = (response?.data || [])
+        .map((row: any) => String(row?.nicheName || "").trim())
+        .filter(Boolean);
+
+      setNicheOptions(Array.from(new Set(niches)) as string[]);
+    })();
   }, []);
 
   async function runAction(
@@ -984,6 +1215,7 @@ export default function InstantlyControlPanelPage() {
         numLeads: Number(pushForm.numLeads),
         dailyLimit: Number(pushForm.dailyLimit),
         selectedSenders: pushForm.selectedSenders,
+        niche: pushForm.niche === "All" ? "" : pushForm.niche,
       });
 
       if (response?.success) {
@@ -1025,6 +1257,7 @@ export default function InstantlyControlPanelPage() {
         dailyLimit: Number(batchForm.dailyLimit),
         numWeekdays: Number(batchForm.numWeekdays),
         selectedSenders: batchForm.selectedSenders,
+        niche: batchForm.niche === "All" ? "" : batchForm.niche,
       });
 
       if (response?.success) {
@@ -1123,6 +1356,14 @@ export default function InstantlyControlPanelPage() {
               <ChannelSelect
                 value={pushForm.channel}
                 onChange={updatePushChannel}
+              />
+            </FieldLabel>
+
+            <FieldLabel label="Niche (optional)">
+              <NicheSelect
+                value={pushForm.niche}
+                options={nicheOptions}
+                onChange={(niche) => setPushForm({ ...pushForm, niche })}
               />
             </FieldLabel>
 
@@ -1267,6 +1508,14 @@ export default function InstantlyControlPanelPage() {
               />
             </FieldLabel>
 
+            <FieldLabel label="Niche (optional)">
+              <NicheSelect
+                value={batchForm.niche}
+                options={nicheOptions}
+                onChange={(niche) => setBatchForm({ ...batchForm, niche })}
+              />
+            </FieldLabel>
+
             <FieldLabel label="Leads Per Day">
               <Input
                 type="number"
@@ -1383,6 +1632,8 @@ export default function InstantlyControlPanelPage() {
           </form>
         </div>
       </section>
+
+      <CoolingOffCard />
 
       <ImportedLeadsTable
         leads={importedLeads}

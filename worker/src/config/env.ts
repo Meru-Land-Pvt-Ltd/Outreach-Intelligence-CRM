@@ -7,6 +7,10 @@ function numberValue(value: any, fallback: number) {
   return Number.isNaN(parsed) ? fallback : parsed;
 }
 
+function cappedValue(value: any, fallback: number, ceiling: number) {
+  return Math.min(numberValue(value, fallback), ceiling);
+}
+
 function booleanValue(value: any, fallback: boolean) {
   if (value === undefined || value === null || value === "") return fallback;
   return String(value).toLowerCase() === "true";
@@ -74,7 +78,7 @@ export const env = {
   instantlyDailyMaxLeads: numberValue(process.env.INSTANTLY_DAILY_MAX_LEADS, 160),
   instantlyLimitEmailsPerCompany: numberValue(
     process.env.INSTANTLY_LIMIT_EMAILS_PER_COMPANY,
-    2
+    4
   ),
 
   millionVerifierApiKey: process.env.MILLION_VERIFIER_API_KEY || "",
@@ -110,47 +114,43 @@ export const env = {
   ),
   prospeoSearchPages: numberValue(process.env.PROSPEO_SEARCH_PAGES, 3),
 
-  maxVideosPerSeed: Math.max(
-    numberValue(process.env.MAX_VIDEOS_PER_SEED, 1000),
-    100000
-  ),
-  maxChannelsPerSeed: Math.max(
-    numberValue(process.env.MAX_CHANNELS_PER_SEED, 500),
-    500
-  ),
-  maxVideosPerChannel: Math.max(
-    numberValue(process.env.MAX_VIDEOS_PER_CHANNEL, 100),
-    100
-  ),
-  maxSeedVideosToInspect: Math.max(
-    numberValue(process.env.MAX_SEED_VIDEOS_TO_INSPECT, 500),
-    500
-  ),
-  maxChannelPagesPerSeed: Math.max(
-    numberValue(process.env.MAX_CHANNEL_PAGES_PER_SEED, 50),
-    50
-  ),
-  rawVideoAnalysisBatchSize: Math.max(
-    numberValue(process.env.RAW_VIDEO_ANALYSIS_BATCH_SIZE, 5),
-    5
-  ),
-  rawVideoAnalysisLimit: Math.max(
-    numberValue(process.env.RAW_VIDEO_ANALYSIS_LIMIT, 1000),
+  // Crawl limits are hard caps (ceilings). These previously used Math.max,
+  // which turned every limit into a floor and made crawls effectively unbounded.
+  maxVideosPerSeed: cappedValue(process.env.MAX_VIDEOS_PER_SEED, 2000, 20000),
+  maxChannelsPerSeed: cappedValue(process.env.MAX_CHANNELS_PER_SEED, 150, 1000),
+  maxVideosPerChannel: cappedValue(process.env.MAX_VIDEOS_PER_CHANNEL, 30, 200),
+  maxSeedVideosToInspect: cappedValue(
+    process.env.MAX_SEED_VIDEOS_TO_INSPECT,
+    200,
     1000
   ),
-  videoLookbackDays: Math.max(numberValue(process.env.VIDEO_LOOKBACK_DAYS, 90), 90),
+  maxChannelPagesPerSeed: cappedValue(
+    process.env.MAX_CHANNEL_PAGES_PER_SEED,
+    10,
+    50
+  ),
+  rawVideoAnalysisBatchSize: numberValue(
+    process.env.RAW_VIDEO_ANALYSIS_BATCH_SIZE,
+    5
+  ),
+  rawVideoAnalysisLimit: cappedValue(
+    process.env.RAW_VIDEO_ANALYSIS_LIMIT,
+    2500,
+    25000
+  ),
+  videoLookbackDays: numberValue(process.env.VIDEO_LOOKBACK_DAYS, 90),
   recentSponsorshipDays: numberValue(process.env.RECENT_SPONSORSHIP_DAYS, 30),
 
   minSubscribers: numberValue(process.env.MIN_SUBSCRIBERS, 1000),
   maxSubscribers: numberValue(process.env.MAX_SUBSCRIBERS, 1000000),
 
   maxContactsPerBrand: numberValue(process.env.MAX_CONTACTS_PER_BRAND, 20),
-  maxDiscoveryBrandsPerRun: Math.max(
-    numberValue(process.env.MAX_DISCOVERY_BRANDS_PER_RUN, 100),
+  maxDiscoveryBrandsPerRun: numberValue(
+    process.env.MAX_DISCOVERY_BRANDS_PER_RUN,
     100
   ),
-  maxVerificationPerRun: Math.max(
-    numberValue(process.env.MAX_VERIFICATION_PER_RUN, 1000),
+  maxVerificationPerRun: numberValue(
+    process.env.MAX_VERIFICATION_PER_RUN,
     1000
   ),
   maxInstantlyPushPerRun: numberValue(process.env.MAX_INSTANTLY_PUSH_PER_RUN, 160),
