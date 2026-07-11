@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { X } from "lucide-react";
 import { apiGet, apiPost } from "@/lib/api";
+import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Notice } from "@/components/shared/notice";
@@ -118,6 +119,22 @@ export function CreateCampaignDialog({
   }, [open, channel]);
 
   const leadIds = useMemo(() => leads.map((lead) => lead._id), [leads]);
+
+  // Group rejected leads by reason so the preview reads as a summary, not a dump.
+  const rejectedGroups = useMemo(() => {
+    const byReason = new Map<string, string[]>();
+
+    for (const r of preview?.rejected || []) {
+      const reason = r.reason || "Not eligible";
+      const label = r.email || r.id;
+      if (!byReason.has(reason)) byReason.set(reason, []);
+      byReason.get(reason)!.push(label);
+    }
+
+    return Array.from(byReason.entries())
+      .map(([reason, emails]) => ({ reason, emails }))
+      .sort((a, b) => b.emails.length - a.emails.length);
+  }, [preview]);
 
   async function runPreview() {
     setBusy("preview");
@@ -346,41 +363,89 @@ export function CreateCampaignDialog({
             </div>
           ) : (
             <div className="mt-3 space-y-5">
-              <div className="rounded-xl border border-slate-200 bg-slate-50/60 p-4">
-                <p className="text-sm font-bold text-slate-900">
-                  {preview?.eligibleCount || 0} lead(s) will be pushed
-                  {preview?.rejected && preview.rejected.length > 0
-                    ? ` · ${preview.rejected.length} rejected`
-                    : ""}
-                </p>
-                {preview?.payloadSummary ? (
-                  <p className="mt-1 text-xs font-medium text-slate-500">
-                    {preview.payloadSummary.name} · daily limit{" "}
-                    {preview.payloadSummary.daily_limit} ·{" "}
-                    {(preview.payloadSummary.email_list || []).length} senders
-                  </p>
-                ) : null}
-              </div>
+              {(() => {
+                const eligible = preview?.eligibleCount || 0;
+                const rejectedCount = preview?.rejected?.length || 0;
+                const total = eligible + rejectedCount;
 
-              {preview?.rejected && preview.rejected.length > 0 ? (
-                <div className="rounded-xl border border-rose-200 bg-rose-50 p-4">
-                  <p className="text-xs font-bold uppercase tracking-wide text-rose-700">
-                    Rejected leads
+                return (
+                  <div
+                    className={cn(
+                      "rounded-xl border p-4",
+                      eligible > 0
+                        ? "border-emerald-200 bg-emerald-50"
+                        : "border-amber-200 bg-amber-50"
+                    )}
+                  >
+                    <p
+                      className={cn(
+                        "text-sm font-bold",
+                        eligible > 0 ? "text-emerald-800" : "text-amber-800"
+                      )}
+                    >
+                      {eligible} of {total} selected lead(s) will be pushed
+                    </p>
+                    {preview?.payloadSummary ? (
+                      <p className="mt-1 text-xs font-medium text-slate-600">
+                        {preview.payloadSummary.name} · daily limit{" "}
+                        {preview.payloadSummary.daily_limit} ·{" "}
+                        {(preview.payloadSummary.email_list || []).length} senders
+                      </p>
+                    ) : null}
+                    {eligible === 0 ? (
+                      <p className="mt-2 text-xs font-medium text-amber-700">
+                        None of the selected leads can be pushed right now — see
+                        the reasons below. The most common one is that the brand
+                        already reached its per-brand email cap (raise it in
+                        Pipeline Settings, or release older pushes via
+                        Cooling-off to re-pitch).
+                      </p>
+                    ) : null}
+                  </div>
+                );
+              })()}
+
+              {rejectedGroups.length > 0 ? (
+                <div className="rounded-xl border border-slate-200">
+                  <p className="border-b border-slate-200 px-4 py-2.5 text-xs font-bold uppercase tracking-wide text-slate-500">
+                    Rejected · {preview?.rejected?.length || 0}
                   </p>
-                  <ul className="mt-2 max-h-40 space-y-1 overflow-auto text-sm text-rose-700">
-                    {preview.rejected.map((r) => (
-                      <li key={r.id}>
-                        {r.email || r.id} — {r.reason}
-                      </li>
+                  <div className="max-h-56 divide-y divide-slate-100 overflow-auto">
+                    {rejectedGroups.map((group) => (
+                      <div key={group.reason} className="px-4 py-3">
+                        <div className="flex items-center justify-between">
+                          <span className="text-sm font-semibold text-slate-800">
+                            {group.reason}
+                          </span>
+                          <span className="inline-flex rounded-full bg-slate-100 px-2 py-0.5 text-xs font-semibold text-slate-600">
+                            {group.emails.length}
+                          </span>
+                        </div>
+                        <ul className="mt-1.5 space-y-0.5">
+                          {group.emails.map((email, i) => (
+                            <li
+                              key={`${email}-${i}`}
+                              className="truncate text-xs text-slate-500"
+                            >
+                              {email}
+                            </li>
+                          ))}
+                        </ul>
+                      </div>
                     ))}
-                  </ul>
+                  </div>
                 </div>
               ) : null}
 
               <div>
                 <p className="text-xs font-bold uppercase tracking-wide text-slate-500">
-                  Eligible leads
+                  Eligible leads · {preview?.eligibleCount || 0}
                 </p>
+                {(preview?.leads || []).length === 0 ? (
+                  <p className="mt-2 rounded-lg border border-dashed border-slate-200 px-4 py-6 text-center text-sm font-medium text-slate-400">
+                    No leads are eligible to push.
+                  </p>
+                ) : null}
                 <div className="mt-2 max-h-64 space-y-2 overflow-auto">
                   {(preview?.leads || []).map((lead) => (
                     <div

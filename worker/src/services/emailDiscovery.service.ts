@@ -115,12 +115,24 @@ function isBlacklistedUrl(url: string) {
   return URL_BLACKLIST.some((bad) => lower.includes(bad));
 }
 
+// Asset/code files that the page scraper can mistake for emails, e.g.
+// "swiper@12.min.css", "ecom-swiper@11.0.5.js", "<hash>@origin.ico".
+const ASSET_EMAIL_REGEX =
+  /(\.(css|js|mjs|cjs|ts|json|map|scss|less|png|jpe?g|svg|webp|gif|woff2?|ttf|otf|eot|ico|mp4|webm|mp3|wav|pdf|xml|yml|yaml)$)|(@\d+(\.\d+)*\.)|(\.min\.)/i;
+
 function isValidEmail(email: string) {
   if (!email) return false;
 
   const lower = email.toLowerCase();
 
   if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(lower)) return false;
+
+  // Reject versioned/minified asset references (CDN paths parsed as emails).
+  if (ASSET_EMAIL_REGEX.test(lower)) return false;
+
+  // The TLD must be alphabetic (2+ letters) — "12.min.css" style domains fail.
+  const tld = lower.split(".").pop() || "";
+  if (!/^[a-z]{2,}$/.test(tld)) return false;
 
   return !JUNK_PATTERNS.some((junk) => lower.includes(junk));
 }
