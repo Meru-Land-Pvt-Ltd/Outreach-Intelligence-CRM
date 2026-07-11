@@ -600,7 +600,7 @@ function PipelineSettingsCard() {
                       label="Pushed per brand"
                       value={settings.maxEmailsPerBrand}
                       min={1}
-                      max={10}
+                      max={100}
                       onChange={(value) => update("maxEmailsPerBrand", value)}
                     />
                     <SettingsNumberField

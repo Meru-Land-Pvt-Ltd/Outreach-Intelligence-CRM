@@ -157,7 +157,7 @@ const SETTING_SANITIZERS: Record<string, (value: any) => any> = {
   maxBrandsPerSeed: (value) =>
     clampNumber(value, APP_SETTING_DEFAULTS.maxBrandsPerSeed, 10, 500),
   maxEmailsPerBrand: (value) =>
-    clampNumber(value, APP_SETTING_DEFAULTS.maxEmailsPerBrand, 1, 10),
+    clampNumber(value, APP_SETTING_DEFAULTS.maxEmailsPerBrand, 1, 100),
   scrapeFirstSkipPaid: (value) =>
     booleanFrom(value, APP_SETTING_DEFAULTS.scrapeFirstSkipPaid),
   scrapeSkipThreshold: (value) =>
