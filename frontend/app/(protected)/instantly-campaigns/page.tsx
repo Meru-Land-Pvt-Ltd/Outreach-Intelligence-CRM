@@ -170,16 +170,31 @@ function toChannel(value: string): Channel {
   return value === "MHD Tech" ? "MHD Tech" : "Enoylity Technology";
 }
 
-function stripHtml(value?: string) {
-  return clean(value)
-    .replace(/<br\s*\/?>/gi, "\n")
-    .replace(/<\/div>/gi, "\n")
-    .replace(/<[^>]+>/g, "")
-    .replace(/&amp;/g, "&")
-    .replace(/&nbsp;/g, " ")
-    .replace(/&quot;/g, '"')
-    .replace(/&#39;/g, "'")
-    .trim();
+// Render the HTML email body/follow-ups as the real email (paragraphs, links,
+// decoded entities) instead of tag-stripping into an unstructured block.
+function EmailHtmlBlock({
+  html,
+  maxHeightClassName = "max-h-[360px]",
+}: {
+  html?: string;
+  maxHeightClassName?: string;
+}) {
+  const content = clean(html);
+
+  if (!content) {
+    return (
+      <p className="mt-2 rounded-2xl border border-slate-200 bg-white p-4 text-sm text-slate-400">
+        —
+      </p>
+    );
+  }
+
+  return (
+    <div
+      className={`mt-2 ${maxHeightClassName} overflow-auto rounded-2xl border border-slate-200 bg-white p-4 text-sm leading-6 text-slate-700 [&_a]:break-all [&_a]:text-blue-600 [&_a]:underline [&_ol]:my-2 [&_ol]:list-decimal [&_ol]:pl-5 [&_p]:my-2 [&_ul]:my-2 [&_ul]:list-disc [&_ul]:pl-5`}
+      dangerouslySetInnerHTML={{ __html: content }}
+    />
+  );
 }
 
 function getLeadKey(lead: ImportedLead, index: number) {
@@ -750,9 +765,7 @@ function TemplatePreviewSideModal({
                   Body
                 </p>
 
-                <pre className="mt-2 max-h-[360px] overflow-auto whitespace-pre-wrap rounded-2xl border border-slate-200 bg-white p-4 text-sm leading-6 text-slate-700">
-                  {stripHtml(preview.body) || "-"}
-                </pre>
+                <EmailHtmlBlock html={preview.body} />
               </div>
 
               <div>
@@ -760,9 +773,7 @@ function TemplatePreviewSideModal({
                   Follow Up 1
                 </p>
 
-                <pre className="mt-2 max-h-56 overflow-auto whitespace-pre-wrap rounded-2xl border border-slate-200 bg-white p-4 text-sm leading-6 text-slate-700">
-                  {stripHtml(preview.followUp1) || "-"}
-                </pre>
+                <EmailHtmlBlock html={preview.followUp1} maxHeightClassName="max-h-56" />
               </div>
 
               <div>
@@ -770,9 +781,7 @@ function TemplatePreviewSideModal({
                   Follow Up 2
                 </p>
 
-                <pre className="mt-2 max-h-56 overflow-auto whitespace-pre-wrap rounded-2xl border border-slate-200 bg-white p-4 text-sm leading-6 text-slate-700">
-                  {stripHtml(preview.followUp2) || "-"}
-                </pre>
+                <EmailHtmlBlock html={preview.followUp2} maxHeightClassName="max-h-56" />
               </div>
             </div>
           )}
