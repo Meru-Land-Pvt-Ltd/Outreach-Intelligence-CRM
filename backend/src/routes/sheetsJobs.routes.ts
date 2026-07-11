@@ -7,6 +7,7 @@ import {
   pauseIntelligenceJob,
   resumeIntelligenceJob,
   runIntelligenceJob,
+  startEmailCrawlingJob,
   stopIntelligenceJob
 } from "../controllers/sheetsJobs.controller";
 
@@ -16,6 +17,7 @@ router.get("/sheets/closed-deals", getClosedDeals);
 router.post("/sheets/closed-deals", createClosedDeal);
 
 router.post("/jobs/run-intelligence/:seedBrandId", runIntelligenceJob);
+router.post("/jobs/start-email-crawling/:seedBrandId", startEmailCrawlingJob);
 router.post("/jobs/intelligence/:jobId/pause", pauseIntelligenceJob);
 router.post("/jobs/intelligence/:jobId/resume", resumeIntelligenceJob);
 router.post("/jobs/intelligence/:jobId/stop", stopIntelligenceJob);

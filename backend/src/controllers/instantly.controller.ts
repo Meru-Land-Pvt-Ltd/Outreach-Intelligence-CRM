@@ -1,4 +1,5 @@
 import { Request, Response } from "express";
+import mongoose from "mongoose";
 import axios from "axios";
 import dns from "dns/promises";
 import { Contact } from "../models/Contact.model";
@@ -689,7 +690,9 @@ function getProductNameFromBrandMap(brandMap: any) {
     product = product.substring(brandName.length).trim();
   }
 
-  return product;
+  // Never emit an empty product: campaigns render {{productName}} in
+  // subjects/bodies, and service brands have no product at all.
+  return product || (brandName ? brandName + " products" : "");
 }
 
 function getDomainFromEmail(email: string) {
@@ -1227,6 +1230,162 @@ async function getEligibleLeads(input: {
   return { leadsToPush, leadIds };
 }
 
+// Id-based eligibility for campaign-from-selected-leads. Enforces the SAME
+// protections as getEligibleLeads (no re-push, cross-channel bounce, excluded
+// companies, per-company cap, live verify + gateway) — the user picking a lead
+// does NOT bypass safety. Rejected leads are returned with a reason.
+async function getEligibleLeadsByIds(input: {
+  channel: string;
+  leadIds: string[];
+}) {
+  const settings = await getAppSettings();
+  const perBrandCap = Math.max(1, Number(settings.maxEmailsPerBrand) || 4);
+
+  const validObjectIds = input.leadIds
+    .filter((id) => mongoose.Types.ObjectId.isValid(id))
+    .map((id) => new mongoose.Types.ObjectId(id));
+
+  const rows = await InstantlyLeadModel.find({
+    _id: { $in: validObjectIds },
+    channel: input.channel
+  });
+
+  const excludedCompanies = new Set<string>(
+    (
+      await BrandMapModel.find(
+        { $or: [{ selectionStatus: "excluded" }, { isExcluded: true }] },
+        { brandName: 1 }
+      ).lean()
+    )
+      .map((row: any) => cleanText(row.brandName).toLowerCase())
+      .filter(Boolean)
+  );
+
+  const pushedCounts: Record<string, number> = {};
+
+  const pushedAgg = await InstantlyLeadModel.aggregate([
+    {
+      $match: {
+        channel: input.channel,
+        pushedStatus: { $nin: ["", null] }
+      }
+    },
+    { $group: { _id: "$companyName", count: { $sum: 1 } } }
+  ]);
+
+  for (const item of pushedAgg) {
+    const key = cleanText(item._id).toLowerCase();
+    if (key) pushedCounts[key] = Number(item.count || 0);
+  }
+
+  const selectedThisRun: Record<string, number> = {};
+  const leadsToPush: any[] = [];
+  const leadIds: any[] = [];
+  const rejected: Array<{ id: string; email: string; reason: string }> = [];
+  const checkedGateways: Record<string, string> = {};
+
+  for (const row of rows as any[]) {
+    const id = String(row._id);
+    const email = cleanEmail(row.email);
+
+    if (!email) {
+      rejected.push({ id, email: "", reason: "Missing email" });
+      continue;
+    }
+
+    if (cleanText(row.pushedStatus)) {
+      rejected.push({ id, email, reason: "Already pushed" });
+      continue;
+    }
+
+    if (!isBounceRejectedEmpty(row.instantlyBounced)) {
+      rejected.push({ id, email, reason: "Bounced in Instantly" });
+      continue;
+    }
+
+    const companyKey = cleanText(row.companyName).toLowerCase();
+
+    if (companyKey && excludedCompanies.has(companyKey)) {
+      rejected.push({ id, email, reason: "Brand is excluded" });
+      continue;
+    }
+
+    if (
+      companyKey &&
+      (pushedCounts[companyKey] || 0) + (selectedThisRun[companyKey] || 0) >=
+        perBrandCap
+    ) {
+      rejected.push({
+        id,
+        email,
+        reason: "Per-brand cap reached (" + perBrandCap + ")"
+      });
+      continue;
+    }
+
+    let verificationStatus = cleanText(row.verificationStatus);
+
+    if (shouldVerifyLeadStatus(verificationStatus)) {
+      const verifyResult = await verifyEmailWithMillionVerifier(email);
+      verificationStatus = verifyResult.status;
+
+      await InstantlyLeadModel.findByIdAndUpdate(row._id, {
+        $set: {
+          verificationStatus,
+          raw: { ...(row.raw || {}), millionVerifier: verifyResult.raw }
+        }
+      });
+
+      await new Promise((resolve) => setTimeout(resolve, 150));
+    }
+
+    if (isVerificationRejected(verificationStatus)) {
+      rejected.push({ id, email, reason: "Failed verification" });
+      continue;
+    }
+
+    let gatewayStatus = cleanText(row.gatewayBounced);
+
+    if (!gatewayStatus || gatewayStatus === "-" || gatewayStatus === "Not Checked") {
+      const domain = getDomainFromEmail(email);
+      gatewayStatus =
+        (domain && checkedGateways[domain]) ||
+        (await checkEmailGateway(domain));
+      if (domain) checkedGateways[domain] = gatewayStatus;
+
+      await InstantlyLeadModel.updateOne(
+        { _id: row._id },
+        { $set: { gatewayBounced: gatewayStatus } }
+      );
+      row.gatewayBounced = gatewayStatus;
+    }
+
+    if (isBounceRejected(gatewayStatus) || gatewayStatus !== "Safe") {
+      rejected.push({ id, email, reason: "Gateway not safe (" + gatewayStatus + ")" });
+      continue;
+    }
+
+    if (!isEligibleForInstantlyPush(row)) {
+      rejected.push({ id, email, reason: "Not eligible for push" });
+      continue;
+    }
+
+    leadsToPush.push(row);
+    leadIds.push(row._id);
+
+    if (companyKey) {
+      selectedThisRun[companyKey] = (selectedThisRun[companyKey] || 0) + 1;
+    }
+  }
+
+  return { leadsToPush, leadIds, rejected };
+}
+
+function isBounceRejectedEmpty(value: any) {
+  const text = cleanText(value).toLowerCase();
+  return text === "" || text === "not bounced";
+}
+
 // Instantly has no campaign folders; custom tags are the grouping mechanism.
 // Tag label → id cache lives for the process lifetime.
 const instantlyTagCache: Record<string, string> = {};
@@ -1359,6 +1518,7 @@ async function createAndPushCampaign(input: {
   selectedSenders?: any[];
   usedEmails?: Record<string, boolean>;
   niche?: string;
+  explicitLeads?: { leadsToPush: any[]; leadIds: any[] };
 }) {
   await ensureTemplates();
 
@@ -1388,12 +1548,16 @@ async function createAndPushCampaign(input: {
   }
 
 
-  const { leadsToPush, leadIds } = await getEligibleLeads({
-    channel: input.channel,
-    numLeads: input.numLeads,
-    usedEmails: input.usedEmails,
-    niche: input.niche
-  });
+  // Id-based campaigns pass their already-validated leads; count-based
+  // campaigns select them here.
+  const { leadsToPush, leadIds } = input.explicitLeads
+    ? input.explicitLeads
+    : await getEligibleLeads({
+        channel: input.channel,
+        numLeads: input.numLeads,
+        usedEmails: input.usedEmails,
+        niche: input.niche
+      });
 
   if (leadsToPush.length === 0) {
     throw new Error("No valid eligible leads found after verification and gateway check.");
@@ -1445,7 +1609,8 @@ async function createAndPushCampaign(input: {
       $set: {
         pushedStatus: pushedLabel,
         pushedAt,
-        campaignId
+        campaignId,
+        campaignName: input.campaignName
       }
     });
 
@@ -2588,6 +2753,9 @@ async function runInstantlyExportNow(input: { brandName?: string; jobId?: string
           verificationStatus,
           instantlyBounced: "",
           gatewayBounced: "Not Checked",
+          foundVia: cleanText(brandMap.foundVia || brandMap.seedBrandName),
+          pgaScore:
+            typeof brandMap.pgaScore === "number" ? brandMap.pgaScore : null,
           brandMapId: brandMap._id,
           contactId: contact._id,
           raw: {
@@ -3111,16 +3279,288 @@ export async function batchPushCampaigns(req: Request, res: Response) {
 
 export async function getInstantlyCampaigns(req: Request, res: Response) {
   try {
-    const rows = await InstantlyCampaignModel.find({})
+    const channel = cleanText(req.query.channel);
+    const filter: Record<string, any> = {};
+
+    if (channel) {
+      filter.channel = channel;
+    }
+
+    const rows = await InstantlyCampaignModel.find(filter)
       .sort({ createdAt: -1 })
-      .limit(1000);
+      .limit(1000)
+      .lean();
+
+    // One aggregate enriches every card with live lead counts.
+    const campaignIds = rows
+      .map((row: any) => cleanText(row.instantlyCampaignId))
+      .filter(Boolean);
+
+    const statsByCampaign: Record<string, any> = {};
+
+    if (campaignIds.length > 0) {
+      const agg = await InstantlyLeadModel.aggregate([
+        { $match: { campaignId: { $in: campaignIds } } },
+        {
+          $group: {
+            _id: "$campaignId",
+            total: { $sum: 1 },
+            bounced: {
+              $sum: {
+                $cond: [
+                  { $in: ["$instantlyBounced", ["", null, "Not bounced"]] },
+                  0,
+                  1
+                ]
+              }
+            },
+            verified: {
+              $sum: { $cond: [{ $eq: ["$verificationStatus", "Ok"] }, 1, 0] }
+            }
+          }
+        }
+      ]);
+
+      for (const item of agg) {
+        statsByCampaign[String(item._id)] = {
+          leadsInCampaign: item.total,
+          bouncedCount: item.bounced,
+          verifiedCount: item.verified
+        };
+      }
+    }
+
+    const now = Date.now();
+
+    const data = rows.map((row: any) => {
+      const stats = statsByCampaign[cleanText(row.instantlyCampaignId)] || {
+        leadsInCampaign: 0,
+        bouncedCount: 0,
+        verifiedCount: 0
+      };
+
+      const endTime = row.endDate ? new Date(row.endDate).getTime() : 0;
+      const derivedStatus =
+        endTime && endTime < now ? "Completed" : row.status || "Active";
+
+      return { ...row, ...stats, derivedStatus };
+    });
 
     res.json({
       success: true,
-      count: rows.length,
-      data: rows
+      count: data.length,
+      data
     });
   } catch (error: any) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+}
+
+export async function getInstantlyCampaignLeads(req: Request, res: Response) {
+  try {
+    const id = String(req.params.id || "");
+
+    if (!mongoose.Types.ObjectId.isValid(id)) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid campaign id"
+      });
+    }
+
+    const campaign: any = await InstantlyCampaignModel.findById(id).lean();
+
+    if (!campaign) {
+      return res.status(404).json({
+        success: false,
+        message: "Campaign not found"
+      });
+    }
+
+    const leads = await InstantlyLeadModel.find({
+      channel: campaign.channel,
+      campaignId: campaign.instantlyCampaignId
+    })
+      .sort({ pushedAt: -1, createdAt: -1 })
+      .lean();
+
+    const data = leads.map((lead: any) => ({
+      ...lead,
+      instantlyBounced: getInstantlyBouncedStatusForResponse(lead),
+      verificationStatus: getVerificationStatusForResponse(lead)
+    }));
+
+    res.json({
+      success: true,
+      campaign,
+      count: data.length,
+      data
+    });
+  } catch (error: any) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+}
+
+function buildPushConfig(body: any) {
+  return {
+    channel: cleanText(body.channel),
+    campaignName: cleanText(body.campaignName),
+    startDate: cleanText(body.startDate),
+    endDate: cleanText(body.endDate) || cleanText(body.startDate),
+    startTime:
+      cleanText(body.startTime) ||
+      process.env.INSTANTLY_DEFAULT_START_TIME ||
+      "09:00",
+    endTime:
+      cleanText(body.endTime) ||
+      process.env.INSTANTLY_DEFAULT_END_TIME ||
+      "16:00",
+    dailyLimit: Number(
+      body.dailyLimit || process.env.INSTANTLY_DEFAULT_DAILY_LIMIT || 160
+    ),
+    selectedSenders: Array.isArray(body.selectedSenders)
+      ? body.selectedSenders
+      : [],
+    leadIds: Array.isArray(body.leadIds)
+      ? body.leadIds.map((id: any) => String(id))
+      : []
+  };
+}
+
+// Preview a campaign built from explicitly selected leads: runs the real
+// eligibility checks (which persist verification/gateway hygiene) and returns
+// the exact payload + per-lead variables the push would send.
+export async function previewSelectedCampaign(req: Request, res: Response) {
+  try {
+    const cfg = buildPushConfig(req.body);
+
+    if (!cfg.channel || cfg.leadIds.length === 0) {
+      return res.status(400).json({
+        success: false,
+        message: "channel and leadIds are required"
+      });
+    }
+
+    const { leadsToPush, leadIds, rejected } = await getEligibleLeadsByIds({
+      channel: cfg.channel,
+      leadIds: cfg.leadIds
+    });
+
+    let nameConflict = false;
+
+    if (cleanText(cfg.campaignName)) {
+      const searchResult = await instantlyApiCall(
+        "GET",
+        "/campaigns?search=" +
+          encodeURIComponent(cfg.campaignName) +
+          "&limit=100"
+      );
+      const existing = Array.isArray(searchResult?.items)
+        ? searchResult.items
+        : Array.isArray(searchResult)
+          ? searchResult
+          : [];
+      nameConflict = existing.some((c: any) => c.name === cfg.campaignName);
+    }
+
+    await ensureTemplates();
+    const template = await InstantlyTemplateModel.findOne({
+      channel: cfg.channel
+    });
+
+    const payload = template
+      ? buildCampaignPayload({ ...cfg, template })
+      : null;
+
+    res.json({
+      success: true,
+      nameConflict,
+      eligibleCount: leadsToPush.length,
+      rejected,
+      leadIds: leadIds.map((id: any) => String(id)),
+      payloadSummary: payload
+        ? {
+            name: payload.name,
+            email_list: payload.email_list,
+            daily_limit: payload.daily_limit,
+            campaign_schedule: payload.campaign_schedule
+          }
+        : null,
+      leads: leadsToPush.map((lead: any) => ({
+        _id: String(lead._id),
+        firstName: lead.firstName,
+        email: lead.email,
+        companyName: lead.companyName,
+        productName: lead.productName,
+        relatedVideo: lead.relatedVideo,
+        competitor1: lead.competitor1,
+        competitor2: lead.competitor2,
+        foundVia: lead.foundVia,
+        pgaScore: lead.pgaScore
+      }))
+    });
+  } catch (error: any) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+}
+
+// Push a campaign built from explicitly selected leads.
+export async function pushSelectedCampaign(req: Request, res: Response) {
+  try {
+    const cfg = buildPushConfig(req.body);
+
+    if (
+      !cfg.channel ||
+      !cfg.campaignName ||
+      cfg.leadIds.length === 0 ||
+      !cfg.startDate
+    ) {
+      return res.status(400).json({
+        success: false,
+        message: "channel, campaignName, startDate and leadIds are required"
+      });
+    }
+
+    const { leadsToPush, leadIds, rejected } = await getEligibleLeadsByIds({
+      channel: cfg.channel,
+      leadIds: cfg.leadIds
+    });
+
+    if (leadsToPush.length === 0) {
+      return res.status(400).json({
+        success: false,
+        message: "No eligible leads after verification and gateway checks.",
+        rejected
+      });
+    }
+
+    const result = await createAndPushCampaign({
+      channel: cfg.channel,
+      campaignName: cfg.campaignName,
+      numLeads: leadsToPush.length,
+      startDate: cfg.startDate,
+      endDate: cfg.endDate,
+      startTime: cfg.startTime,
+      endTime: cfg.endTime,
+      dailyLimit: cfg.dailyLimit,
+      selectedSenders: cfg.selectedSenders,
+      explicitLeads: { leadsToPush, leadIds }
+    });
+
+    res.json({
+      success: true,
+      rejected,
+      ...result
+    });
+  } catch (error: any) {
+    await PushLogModel.create({
+      channel: req.body?.channel,
+      campaignName: req.body?.campaignName,
+      totalPushed: 0,
+      dailyLimit: req.body?.dailyLimit,
+      status: "Failed",
+      message: error.message
+    });
+
     res.status(500).json({ success: false, message: error.message });
   }
 }
@@ -3356,7 +3796,7 @@ export async function releasePushedLeads(req: Request, res: Response) {
     });
 
     const rows = await InstantlyLeadModel.find(query)
-      .select("email companyName channel pushedStatus pushedAt campaignId")
+      .select("email companyName channel pushedStatus pushedAt campaignId campaignName")
       .lean();
 
     const byCompany: Record<string, number> = {};
@@ -3410,12 +3850,14 @@ export async function releasePushedLeads(req: Request, res: Response) {
                 releasedBy: String((req as any).user?.email || ""),
                 previousPushedStatus: row.pushedStatus || "",
                 previousCampaignId: row.campaignId || "",
+                previousCampaignName: row.campaignName || "",
                 previousPushedAt: row.pushedAt || null
               }
             },
             $set: {
               pushedStatus: "",
-              campaignId: ""
+              campaignId: "",
+              campaignName: ""
             },
             $unset: {
               pushedAt: ""

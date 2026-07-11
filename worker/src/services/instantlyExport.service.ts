@@ -7,7 +7,7 @@ const ContactModel = Contact as any;
 const BrandMapModel = BrandMap as any;
 const InstantlyLeadModel = InstantlyLead as any;
 
-const ROLE_TIER_PATTERNS: Array<{ tier: number; pattern: RegExp }> = [
+export const ROLE_TIER_PATTERNS: Array<{ tier: number; pattern: RegExp }> = [
   {
     tier: 1,
     pattern: /founder|co-?founder|ceo|chief executive|owner|president/i
@@ -278,7 +278,9 @@ function getProductNameFromBrandMap(brandMap: any) {
     product = product.substring(brandName.length).trim();
   }
 
-  return product;
+  // Never emit an empty product: campaigns render {{productName}} in
+  // subjects/bodies, and service brands have no product at all.
+  return product || (brandName ? brandName + " products" : "");
 }
 
 function relatedVideoForChannel(channel: string) {
@@ -511,6 +513,9 @@ export async function exportBrandToInstantlyTabs(brandName: string) {
           : "Pending Verification",
         instantlyBounced: "",
         gatewayBounced: "Not Checked",
+        foundVia: cleanText(brandMap.foundVia || brandMap.seedBrandName),
+        pgaScore:
+          typeof brandMap.pgaScore === "number" ? brandMap.pgaScore : null,
         brandMapId: brandMap._id,
         contactId: contact._id,
         raw: {

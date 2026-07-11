@@ -23,6 +23,11 @@ const InstantlyLeadSchema = new mongoose.Schema(
     instantlyBounced: String,
     gatewayBounced: String,
 
+    // Denormalized for filtering and campaign views without extra joins.
+    foundVia: String,
+    pgaScore: Number,
+    campaignName: String,
+
     brandMapId: mongoose.Schema.Types.ObjectId,
     contactId: mongoose.Schema.Types.ObjectId,
     campaignId: String,
@@ -42,6 +47,8 @@ InstantlyLeadSchema.index({ pushedStatus: 1 });
 InstantlyLeadSchema.index({ pushedAt: 1 });
 InstantlyLeadSchema.index({ verificationStatus: 1 });
 InstantlyLeadSchema.index({ instantlyBounced: 1 });
+InstantlyLeadSchema.index({ channel: 1, campaignId: 1 });
+InstantlyLeadSchema.index({ channel: 1, foundVia: 1 });
 
 export const InstantlyLead: any =
   mongoose.models.InstantlyLead ||

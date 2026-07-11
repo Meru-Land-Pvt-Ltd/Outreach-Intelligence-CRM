@@ -8,7 +8,10 @@ import AdminTable, {
   type AdminTableColumn,
 } from "@/components/ui/tableComp";
 import { FilterSearchInput } from "@/components/shared/filter-search-input";
+import { FilterSelect } from "@/components/shared/filter-select";
 import { cn } from "@/lib/utils";
+
+const ALL_VALUE = "All";
 
 type RawYoutubeVideo = {
   _id?: string;
@@ -169,6 +172,8 @@ export default function RawDataPage() {
 
   const [search, setSearch] = useState("");
   const [debouncedSearch, setDebouncedSearch] = useState("");
+  const [foundVia, setFoundVia] = useState(ALL_VALUE);
+  const [foundViaOptions, setFoundViaOptions] = useState<string[]>([]);
 
   const [page, setPage] = useState(1);
   const [totalItems, setTotalItems] = useState(0);
@@ -192,6 +197,29 @@ export default function RawDataPage() {
   useEffect(() => {
     let active = true;
 
+    (async () => {
+      const response: any = await apiGet("/raw-youtube/found-via");
+
+      if (active && Array.isArray(response?.data)) {
+        setFoundViaOptions(response.data);
+      }
+    })();
+
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  function handleFoundViaChange(value: string) {
+    setFoundVia(value);
+    setVideos([]);
+    setPage(1);
+    setExpandedDescriptionId(null);
+  }
+
+  useEffect(() => {
+    let active = true;
+
     async function loadVideos() {
       setLoading(true);
       setError(null);
@@ -204,6 +232,10 @@ export default function RawDataPage() {
 
         if (debouncedSearch) {
           params.set("search", debouncedSearch);
+        }
+
+        if (foundVia !== ALL_VALUE) {
+          params.set("foundVia", foundVia);
         }
 
         const response = (await apiGet(
@@ -262,7 +294,7 @@ export default function RawDataPage() {
     return () => {
       active = false;
     };
-  }, [page, debouncedSearch]);
+  }, [page, debouncedSearch, foundVia]);
 
   const columns = useMemo<AdminTableColumn<RawYoutubeVideo>[]>(
     () => [
@@ -276,6 +308,12 @@ export default function RawDataPage() {
             {index + 1}
           </span>
         ),
+      },
+      {
+        id: "foundVia",
+        header: "Found Via",
+        widthClassName: "min-w-[150px]",
+        render: (video) => video.seedBrandName || "-",
       },
       {
         id: "channelName",
@@ -472,12 +510,29 @@ export default function RawDataPage() {
           </p>
         </div>
 
-        <div className="w-full lg:max-w-[620px] xl:max-w-[720px]">
-          <FilterSearchInput
-            value={search}
-            onChange={setSearch}
-            placeholder="Search raw videos, sponsor, channel, product..."
-          />
+        <div className="flex w-full flex-col gap-3 sm:flex-row lg:max-w-[820px]">
+          <div className="min-w-0 flex-1">
+            <FilterSearchInput
+              value={search}
+              onChange={setSearch}
+              placeholder="Search raw videos, sponsor, channel, product..."
+            />
+          </div>
+
+          <div className="w-full sm:w-56">
+            <FilterSelect
+              label="Found Via"
+              value={foundVia}
+              onChange={handleFoundViaChange}
+              options={[
+                { label: ALL_VALUE, value: ALL_VALUE },
+                ...foundViaOptions.map((name) => ({
+                  label: name,
+                  value: name,
+                })),
+              ]}
+            />
+          </div>
         </div>
       </div>
 

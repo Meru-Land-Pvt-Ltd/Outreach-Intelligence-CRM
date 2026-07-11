@@ -7,6 +7,11 @@ import { intelligenceQueue } from "../queues/intelligence.queue";
 import { upsertExcludedBrand } from "./sheets.controller";
 import { getAppSettings } from "./settings.controller";
 import { callOpenAIWithWebSearch } from "../utils/openaiResponses";
+import {
+  buildPgaPrompt,
+  isPgaCacheFresh,
+  parsePgaJson
+} from "../utils/pgaScore";
 
 function cleanValue(value: any) {
   return String(value || "").trim();
@@ -541,65 +546,9 @@ export async function processSelectedBrands(req: Request, res: Response) {
 // Never runs automatically — button/bulk only, so web-search cost is bounded.
 // ---------------------------------------------------------------------------
 
-function buildIntentPrompt(brandMap: any, lookbackDays: number) {
-  const brandName = cleanValue(brandMap.brandName);
-  const domain = cleanValue(brandMap.domain);
-  const niche = cleanValue(brandMap.niche);
-
-  return [
-    'You are a B2B outreach analyst. Search the public web for activity by the brand "' +
-      brandName +
-      '"' +
-      (domain ? " (website: " + domain + ")" : "") +
-      (niche ? " in the " + niche + " niche" : "") +
-      " within the last " +
-      lookbackDays +
-      " days.",
-    "",
-    "Score 0-100 = probability this brand would buy YouTube influencer-marketing outreach right now. Weight:",
-    "+35 active creator/influencer collaborations, sponsorships, UGC or affiliate programs in the window",
-    "+25 product launch, funding round, or major promo/seasonal campaign in the window",
-    "+15 hiring for marketing/partnerships/social-media roles",
-    "+15 niche momentum: press coverage, social growth, entering new markets",
-    "-10 negative signals: layoffs, shutdown or pivot rumors, legal trouble, statements that they do not do sponsorships",
-    "",
-    "Return STRICT JSON only, no prose before or after:",
-    '{"score": <integer 0-100>, "summary": "<2-3 sentences>", "signals": [{"date": "YYYY-MM-DD", "signal": "<what happened>", "source": "<source domain>"}]}'
-  ].join("\n");
-}
-
-function parseIntentJson(text: string) {
-  const cleaned = String(text || "")
-    .replace(/```json/gi, "")
-    .replace(/```/g, "")
-    .trim();
-
-  const start = cleaned.indexOf("{");
-  const end = cleaned.lastIndexOf("}");
-
-  if (start === -1 || end === -1 || end <= start) {
-    return null;
-  }
-
-  try {
-    const parsed = JSON.parse(cleaned.slice(start, end + 1));
-    const score = Math.round(Number(parsed.score));
-
-    if (!Number.isFinite(score)) {
-      return null;
-    }
-
-    return {
-      score: Math.min(Math.max(score, 0), 100),
-      summary: String(parsed.summary || "").trim(),
-      signals: Array.isArray(parsed.signals) ? parsed.signals.slice(0, 10) : []
-    };
-  } catch {
-    return null;
-  }
-}
-
-async function runIntentScan(brandMapId: string) {
+// PGA (probability of acquisition) scan: 4-criterion web-search rating.
+// Prompt/parse live in utils/pgaScore.ts (twin of the worker's service).
+async function runPgaScan(brandMapId: string) {
   const settings = await getAppSettings();
   const brandMap: any = await BrandMap.findById(brandMapId).lean();
 
@@ -608,32 +557,33 @@ async function runIntentScan(brandMapId: string) {
   }
 
   await BrandMap.findByIdAndUpdate(brandMapId, {
-    $set: { intentStatus: "running" }
+    $set: { pgaStatus: "running" }
   });
 
   try {
-    const prompt = buildIntentPrompt(brandMap, settings.intentLookbackDays);
+    const prompt = buildPgaPrompt(brandMap);
     const text = await callOpenAIWithWebSearch(
       prompt,
-      settings.intentModel || undefined
+      settings.pgaModel || undefined
     );
 
-    const parsed = parseIntentJson(text);
+    const parsed = parsePgaJson(text);
 
     if (!parsed) {
-      throw new Error("AI returned no parseable intent JSON");
+      throw new Error("AI returned no parseable PGA JSON");
     }
 
     const updated = await BrandMap.findByIdAndUpdate(
       brandMapId,
       {
         $set: {
-          intentScore: parsed.score,
-          intentSummary: parsed.summary,
-          intentSignals: parsed.signals,
-          intentCheckedAt: new Date(),
-          intentStatus: "done",
-          intentRaw: { text }
+          pgaScore: parsed.score,
+          pgaSubScores: parsed.subScores,
+          pgaSummary: parsed.summary,
+          pgaSignals: parsed.signals,
+          pgaCheckedAt: new Date(),
+          pgaStatus: "done",
+          pgaRaw: { text }
         }
       },
       { new: true }
@@ -643,22 +593,14 @@ async function runIntentScan(brandMapId: string) {
   } catch (error: any) {
     // Keep any previous score; only the status flips to failed.
     await BrandMap.findByIdAndUpdate(brandMapId, {
-      $set: { intentStatus: "failed" }
+      $set: { pgaStatus: "failed" }
     });
 
     throw error;
   }
 }
 
-function isIntentCacheFresh(brandMap: any, cacheDays: number) {
-  if (!brandMap?.intentCheckedAt) return false;
-
-  const ageMs = Date.now() - new Date(brandMap.intentCheckedAt).getTime();
-
-  return ageMs < cacheDays * 24 * 60 * 60 * 1000;
-}
-
-export async function findBrandIntent(req: Request, res: Response) {
+export async function findBrandPga(req: Request, res: Response) {
   try {
     const id = String(req.params.id || "");
 
@@ -681,7 +623,7 @@ export async function findBrandIntent(req: Request, res: Response) {
 
     const force = Boolean(req.body?.force);
 
-    if (!force && isIntentCacheFresh(existing, settings.intentCacheDays)) {
+    if (!force && isPgaCacheFresh(existing, settings.pgaCacheDays)) {
       return res.json({
         success: true,
         cached: true,
@@ -689,7 +631,7 @@ export async function findBrandIntent(req: Request, res: Response) {
       });
     }
 
-    const updated = await runIntentScan(id);
+    const updated = await runPgaScan(id);
 
     res.json({
       success: true,
@@ -704,9 +646,9 @@ export async function findBrandIntent(req: Request, res: Response) {
   }
 }
 
-// Bulk intent scans run sequentially in-process (same idiom as the export
+// Bulk PGA scans run sequentially in-process (same idiom as the export
 // job map in instantly.controller) with a small delay between calls.
-type IntentJob = {
+type PgaJob = {
   total: number;
   processed: number;
   failed: number;
@@ -715,9 +657,9 @@ type IntentJob = {
   startedAt: number;
 };
 
-const intentJobs = new Map<string, IntentJob>();
+const pgaJobs = new Map<string, PgaJob>();
 
-export async function runBulkIntent(req: Request, res: Response) {
+export async function runBulkPga(req: Request, res: Response) {
   try {
     const ids: string[] = (
       Array.isArray(req.body?.ids) ? req.body.ids : []
@@ -735,7 +677,7 @@ export async function runBulkIntent(req: Request, res: Response) {
     if (ids.length > 50) {
       return res.status(400).json({
         success: false,
-        message: "Too many brands in one intent batch (max 50)."
+        message: "Too many brands in one PGA batch (max 50)."
       });
     }
 
@@ -744,14 +686,14 @@ export async function runBulkIntent(req: Request, res: Response) {
 
     const force = Boolean(req.body?.force);
     const toScan = rows.filter(
-      (row: any) => force || !isIntentCacheFresh(row, settings.intentCacheDays)
+      (row: any) => force || !isPgaCacheFresh(row, settings.pgaCacheDays)
     );
     const skippedCached = rows.length - toScan.length;
 
     const jobId =
-      "intent_" + Date.now().toString(36) + Math.floor(Math.random() * 1e6).toString(36);
+      "pga_" + Date.now().toString(36) + Math.floor(Math.random() * 1e6).toString(36);
 
-    const job: IntentJob = {
+    const job: PgaJob = {
       total: toScan.length,
       processed: 0,
       failed: 0,
@@ -760,12 +702,12 @@ export async function runBulkIntent(req: Request, res: Response) {
       startedAt: Date.now()
     };
 
-    intentJobs.set(jobId, job);
+    pgaJobs.set(jobId, job);
 
     // Prune finished jobs older than an hour.
-    for (const [key, value] of intentJobs.entries()) {
+    for (const [key, value] of pgaJobs.entries()) {
       if (value.done && Date.now() - value.startedAt > 60 * 60 * 1000) {
-        intentJobs.delete(key);
+        pgaJobs.delete(key);
       }
     }
 
@@ -773,12 +715,12 @@ export async function runBulkIntent(req: Request, res: Response) {
       setImmediate(async () => {
         for (const row of toScan as any[]) {
           try {
-            await runIntentScan(String(row._id));
+            await runPgaScan(String(row._id));
             job.processed += 1;
           } catch (error: any) {
             job.failed += 1;
             console.error(
-              "Bulk intent scan failed for",
+              "Bulk PGA scan failed for",
               row.brandName,
               "-",
               error?.message || error
@@ -806,14 +748,14 @@ export async function runBulkIntent(req: Request, res: Response) {
   }
 }
 
-export async function getBulkIntentStatus(req: Request, res: Response) {
+export async function getBulkPgaStatus(req: Request, res: Response) {
   const jobId = String(req.params.jobId || "");
-  const job = intentJobs.get(jobId);
+  const job = pgaJobs.get(jobId);
 
   if (!job) {
     return res.status(404).json({
       success: false,
-      message: "Intent job not found (it may have expired)."
+      message: "PGA job not found (it may have expired)."
     });
   }
 

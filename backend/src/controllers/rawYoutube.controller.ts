@@ -35,6 +35,7 @@ export async function getRawYoutubeVideos(req: Request, res: Response) {
   try {
     const seedBrandId = req.query.seedBrandId as string | undefined;
     const search = String(req.query.search || "").trim();
+    const foundVia = String(req.query.foundVia || "").trim();
 
     const page = getPage(req.query.page);
     const limit = getLimit(req.query.limit);
@@ -44,6 +45,10 @@ export async function getRawYoutubeVideos(req: Request, res: Response) {
 
     if (seedBrandId) {
       filter.seedBrandId = seedBrandId;
+    }
+
+    if (foundVia) {
+      filter.seedBrandName = foundVia;
     }
 
     if (search) {
@@ -105,6 +110,28 @@ export async function getRawYoutubeVideos(req: Request, res: Response) {
         totalItems,
         totalPages: Math.max(1, Math.ceil(totalItems / limit)),
       },
+    });
+  } catch (error: any) {
+    res.status(500).json({
+      success: false,
+      message: error.message,
+    });
+  }
+}
+
+export async function getRawYoutubeFoundViaOptions(req: Request, res: Response) {
+  try {
+    const values = await RawYoutubeVideo.distinct("seedBrandName");
+
+    const data = values
+      .map((value: any) => String(value || "").trim())
+      .filter(Boolean)
+      .sort((a: string, b: string) => a.localeCompare(b));
+
+    res.json({
+      success: true,
+      count: data.length,
+      data,
     });
   } catch (error: any) {
     res.status(500).json({

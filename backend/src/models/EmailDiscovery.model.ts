@@ -23,6 +23,10 @@ const EmailDiscoverySchema = new mongoose.Schema(
     providersSkipped: { type: [String], default: [] },
     scrapeEmailCount: { type: Number, default: 0 },
     scrapeCheckedAt: { type: Date, default: null },
+    hunterFoundCount: { type: Number, default: 0 },
+    apolloFoundCount: { type: Number, default: 0 },
+    prospeoFoundCount: { type: Number, default: 0 },
+    providerSelectedCount: { type: Number, default: 0 },
 
     foundVia: { type: String, default: "" },
     seedBrandId: { type: mongoose.Schema.Types.ObjectId, default: null },

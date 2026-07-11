@@ -32,25 +32,31 @@ function getProspeoHeaders() {
   };
 }
 
-function getTargetTitles() {
-  return [
-    "marketing manager",
-    "brand manager",
-    "partnerships manager",
-    "partnership manager",
-    "influencer marketing manager",
-    "creator partnerships manager",
-    "affiliate marketing manager",
-    "affiliate manager",
-    "public relations manager",
-    "media relations manager",
-    "social media manager",
-    "sponsorship manager",
-    "head of marketing",
-    "director of marketing",
-    "growth manager",
-    "pr manager"
-  ];
+const DEFAULT_TARGET_TITLES = [
+  "marketing manager",
+  "brand manager",
+  "partnerships manager",
+  "partnership manager",
+  "influencer marketing manager",
+  "creator partnerships manager",
+  "affiliate marketing manager",
+  "affiliate manager",
+  "public relations manager",
+  "media relations manager",
+  "social media manager",
+  "sponsorship manager",
+  "head of marketing",
+  "director of marketing",
+  "growth manager",
+  "pr manager"
+];
+
+function getTargetTitles(customTitles?: string[]) {
+  const cleaned = (customTitles || [])
+    .map((title) => String(title || "").trim())
+    .filter(Boolean);
+
+  return cleaned.length > 0 ? cleaned : DEFAULT_TARGET_TITLES;
 }
 
 function sleep(ms: number) {
@@ -221,7 +227,8 @@ async function enrichProspeoPerson(person: any, company: any, domain: string) {
 function buildSearchPayload(
   domain: string,
   includeTitleFilter: boolean,
-  page: number
+  page: number,
+  titles?: string[]
 ) {
   const filters: Record<string, any> = {
     company: {
@@ -233,7 +240,7 @@ function buildSearchPayload(
   };
   if (includeTitleFilter) {
     filters.person_job_title = {
-      include: getTargetTitles(),
+      include: getTargetTitles(titles),
       match_mode: "CONTAINS"
     };
   }
@@ -247,14 +254,15 @@ function buildSearchPayload(
 async function searchProspeoPage(
   domain: string,
   includeTitleFilter: boolean,
-  page: number
+  page: number,
+  titles?: string[]
 ) {
   try {
     await sleep(env.prospeoRequestDelayMs || 1500);
 
     const data = await postProspeo(
       env.prospeoSearchPersonEndpoint || "/search-person",
-      buildSearchPayload(domain, includeTitleFilter, page)
+      buildSearchPayload(domain, includeTitleFilter, page, titles)
     );
 
     return data?.results || [];
@@ -270,12 +278,16 @@ async function searchProspeoPage(
   }
 }
 
-async function searchProspeoPages(domain: string, includeTitleFilter: boolean) {
+async function searchProspeoPages(
+  domain: string,
+  includeTitleFilter: boolean,
+  titles?: string[]
+) {
   const pageLimit = Math.max(1, Math.min(Number(env.prospeoSearchPages || 3), 10));
   const collected: any[] = [];
 
   for (let page = 1; page <= pageLimit; page += 1) {
-    const results = await searchProspeoPage(domain, includeTitleFilter, page);
+    const results = await searchProspeoPage(domain, includeTitleFilter, page, titles);
 
     if (results.length === 0) break;
 
@@ -314,7 +326,10 @@ function uniqueProspeoResults(results: any[]) {
   return unique;
 }
 
-export async function searchProspeoContacts(domain: string) {
+export async function searchProspeoContacts(
+  domain: string,
+  options: { titles?: string[]; maxContacts?: number } = {}
+) {
   if (!env.prospeoApiKey || env.prospeoApiKey.includes("your_")) {
     console.log("Prospeo skipped: PROSPEO_API_KEY missing");
     return [];
@@ -324,12 +339,20 @@ export async function searchProspeoContacts(domain: string) {
 
   if (!normalizedDomain) return [];
 
-  const targetedResults = await searchProspeoPages(normalizedDomain, true);
-  const broadResults = await searchProspeoPages(normalizedDomain, false);
-  const results = uniqueProspeoResults([...targetedResults, ...broadResults]);
+  // Targeted search only: the old broad (no-title-filter) second pass pulled
+  // whole org charts and burned enrichment credits on irrelevant people.
+  const targetedResults = await searchProspeoPages(
+    normalizedDomain,
+    true,
+    options.titles
+  );
+  const results = uniqueProspeoResults(targetedResults);
 
   const contacts = [];
-  const maxContacts = Math.max(1, Number(env.maxContactsPerBrand || 20));
+  const maxContacts = Math.max(
+    1,
+    Number(options.maxContacts || env.maxContactsPerBrand || 20)
+  );
 
   for (const result of results.slice(0, maxContacts)) {
     const person = result.person || result;

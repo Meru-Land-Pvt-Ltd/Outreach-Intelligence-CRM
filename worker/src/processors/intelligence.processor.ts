@@ -15,6 +15,7 @@ import { updateTotalEmailsForBrand } from "../services/totalEmails.service";
 import { addPipelineTrackerLog } from "../services/pipelineTracker.service";
 import { crawlLatestReviewVideos } from "../services/latestReviews.service";
 import { getAppSettings } from "../services/appSettings.service";
+import { scorePgaForSeed } from "../services/pgaScore.service";
 import {
   enforceCrawlerControl,
   getStageState,
@@ -271,6 +272,35 @@ export async function intelligenceProcessor(job: Job, token?: string) {
       60
     );
 
+    let pgaResult: any = null;
+
+    if (settings.pgaAutoScore) {
+      await updateProgress(job, jobId, "PGA_SCAN_STARTED", 61);
+
+      pgaResult = await runStage(jobId, "PGA_SCAN", stageState, () =>
+        scorePgaForSeed(seedBrandId, {
+          checkControl,
+          onProgress: (done, total, brandName) =>
+            updateProgress(
+              job,
+              jobId,
+              "PGA_SCAN_" + done + "/" + total + "_" + brandName,
+              61,
+              { pgaDone: done, pgaTotal: total }
+            )
+        })
+      );
+
+      console.log("PGA scan result:", pgaResult);
+
+      await updateProgress(
+        job,
+        jobId,
+        "PGA_SCAN_DONE_" + (pgaResult?.gatedOut ?? 0) + "_GATED",
+        62
+      );
+    }
+
     await updateProgress(job, jobId, "NICHE_ANALYSIS_STARTED", 62);
 
     const nicheResult = await runStage(jobId, "NICHE", stageState, () =>
@@ -294,7 +324,7 @@ export async function intelligenceProcessor(job: Job, token?: string) {
         type: "Seed",
         brandName: seedBrandName,
         domain: "",
-        status: "COMPLETE - Awaiting brand selection"
+        status: "COMPLETE - Ready for email crawling"
       });
 
       await SeedBrand.findByIdAndUpdate(seedBrandId, {
@@ -303,16 +333,17 @@ export async function intelligenceProcessor(job: Job, token?: string) {
         }
       });
 
-      await markJobCompleted(jobId, "COMPLETE_AWAITING_SELECTION", {
+      await markJobCompleted(jobId, "COMPLETE_AWAITING_EMAIL_CRAWLING", {
         crawlResult,
         aiResult,
         brandMapResult,
+        pgaResult,
         nicheResult,
         manualSelectionMode: true
       });
 
       console.log("====================================");
-      console.log("PIPELINE COMPLETE — AWAITING BRAND SELECTION");
+      console.log("PIPELINE COMPLETE — READY FOR EMAIL CRAWLING");
       console.log("JOB ID:", jobId);
       console.log("SEED BRAND:", seedBrandName);
       console.log("====================================");
@@ -471,6 +502,7 @@ export async function intelligenceProcessor(job: Job, token?: string) {
       crawlResult,
       aiResult,
       brandMapResult,
+      pgaResult,
       nicheResult,
       domainResult,
       emailDiscoveryResult,

@@ -3,7 +3,8 @@ import { env } from "../config/env";
 
 export async function callOpenAIWithWebSearch(
   promptOrSystem: string,
-  optionalUserPrompt?: string
+  optionalUserPrompt?: string,
+  model?: string
 ) {
   const prompt = optionalUserPrompt
     ? promptOrSystem + "\n\n" + optionalUserPrompt
@@ -12,7 +13,7 @@ export async function callOpenAIWithWebSearch(
   const response = await axios.post(
     "https://api.openai.com/v1/responses",
     {
-      model: env.openaiModel || "gpt-4.1-mini",
+      model: model || env.openaiModel || "gpt-4.1-mini",
       tools: [{ type: "web_search" }],
       tool_choice: "required",
       input: prompt,

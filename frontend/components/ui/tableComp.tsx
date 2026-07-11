@@ -102,6 +102,11 @@ export interface AdminTableProps<T> {
   tableClassName?: string;
   bodyClassName?: string;
   headerRowClassName?: string;
+
+  /** Sticky column headers with a bounded, scrollable table body (default on). */
+  stickyHeader?: boolean;
+  /** Tailwind max-height class for the scrollable body when stickyHeader is on. */
+  maxBodyHeight?: string;
 }
 
 function SortHead({
@@ -191,6 +196,8 @@ export default function AdminTable<T>({
   tableClassName,
   bodyClassName,
   headerRowClassName,
+  stickyHeader = true,
+  maxBodyHeight = "max-h-[70vh]",
 }: AdminTableProps<T>) {
   const hasExpandable = Boolean(expandable);
   const hasActions = Boolean(actions);
@@ -212,9 +219,26 @@ export default function AdminTable<T>({
           containerClassName
         )}
       >
-        <div className="overflow-x-auto">
+        <div
+          className={cx(
+            // Single scroll container: the inner shadcn table wrapper is
+            // neutralized so sticky headers anchor to this element.
+            "overflow-x-auto",
+            stickyHeader &&
+              cx(
+                "overflow-auto",
+                maxBodyHeight,
+                "[&_[data-slot=table-container]]:static [&_[data-slot=table-container]]:overflow-visible"
+              )
+          )}
+        >
           <Table className={cx("border-collapse", tableClassName)}>
-            <TableHeader>
+            <TableHeader
+              className={cx(
+                stickyHeader &&
+                  "[&_th]:sticky [&_th]:top-0 [&_th]:z-20 [&_th]:bg-white [&_th]:shadow-[inset_0_-1px_0_0_#e2e8f0]"
+              )}
+            >
               <TableRow
                 className={cx(
                   "border-b border-slate-200 hover:bg-transparent",

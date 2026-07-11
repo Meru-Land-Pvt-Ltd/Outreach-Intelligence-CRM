@@ -9,7 +9,13 @@ import { ProspeoRawContact } from "../models/ProspeoRawContact.model";
 import { PipelineTracker } from "../models/PipelineTracker.model";
 import { logDone, logError } from "./runLog.service";
 import { searchProspeoContacts } from "./prospeo.service";
-import { getAppSettings } from "./appSettings.service";
+import { getAppSettings, AppSettings } from "./appSettings.service";
+import {
+  ProviderContact,
+  buildApolloPocSelectionPrompt,
+  buildRoleMatchers,
+  selectProviderContacts
+} from "./roleSelection.service";
 
 const BrandMapModel = BrandMap as any;
 const ContactModel = Contact as any;
@@ -567,25 +573,50 @@ async function saveContact(input: {
   return true;
 }
 
-async function discoverHunter(brandName: string, domain: string) {
+async function fetchHunterRows(domain: string, filtered: boolean) {
   const key = process.env.HUNTER_API_KEY || "";
   const baseUrl = process.env.HUNTER_BASE_URL || "https://api.hunter.io/v2";
+
+  const params: Record<string, any> = {
+    domain,
+    api_key: key,
+    limit: Number(process.env.HUNTER_LIMIT || 10)
+  };
+
+  if (filtered) {
+    // Hunter's documented department/seniority enums; juniors excluded.
+    params.department = "marketing,communication,management";
+    params.seniority = "senior,executive";
+  }
+
+  const response = await axios.get(baseUrl + "/domain-search", {
+    params,
+    timeout: 30000,
+    validateStatus: () => true
+  });
+
+  return response.data?.data?.emails || [];
+}
+
+async function discoverHunter(
+  brandName: string,
+  domain: string,
+  settings: AppSettings
+): Promise<ProviderContact[]> {
+  const key = process.env.HUNTER_API_KEY || "";
 
   if (!key) return [];
 
   try {
-    const response = await axios.get(baseUrl + "/domain-search", {
-      params: {
-        domain,
-        api_key: key,
-        limit: Number(process.env.HUNTER_LIMIT || 10)
-      },
-      timeout: 30000,
-      validateStatus: () => true
-    });
+    let rows = await fetchHunterRows(domain, true);
 
-    const rows = response.data?.data?.emails || [];
-    const emails: string[] = [];
+    // Filtered call found nobody — fall back to today's unfiltered behavior
+    // so a mis-tagged org chart still yields contacts.
+    if (!rows.length) {
+      rows = await fetchHunterRows(domain, false);
+    }
+
+    const contacts: ProviderContact[] = [];
 
     for (const item of rows) {
       const email = cleanEmail(item.value);
@@ -615,45 +646,49 @@ async function discoverHunter(brandName: string, domain: string) {
         { upsert: true, new: true }
       );
 
-      await saveContact({
-        brandName,
-        domain,
+      contacts.push({
         email,
-        source: "hunter",
         fullName,
-        designation: item.position,
+        role: cleanText(item.position),
+        source: "hunter",
         raw: item
       });
-
-      emails.push(email);
     }
 
-    return uniqueEmails(emails);
+    return contacts;
   } catch {
     return [];
   }
 }
 
-async function aiSelectApolloPOCs(brandName: string, people: any[]) {
+// Role-filtered fallback when the AI POC selection is unavailable: drop
+// exclude-list roles, prefer target-role matches, take the top 5.
+function fallbackApolloPocSelection(people: any[], settings: AppSettings) {
+  const matchers = buildRoleMatchers(settings);
+
+  const eligible = people.filter(
+    (p: any) => !matchers.exclude.some((rx) => rx.test(String(p.title || "")))
+  );
+
+  const targeted = eligible.filter((p: any) =>
+    matchers.target.some((rx) => rx.test(String(p.title || "")))
+  );
+
+  return (targeted.length > 0 ? targeted : eligible).slice(0, 5);
+}
+
+async function aiSelectApolloPOCs(
+  brandName: string,
+  people: any[],
+  settings: AppSettings
+) {
   const key = process.env.OPENAI_API_KEY || "";
 
-  if (!key || people.length === 0) return people.slice(0, 5);
+  if (!key || people.length === 0) {
+    return fallbackApolloPocSelection(people, settings);
+  }
 
-  const prompt =
-    "Select the top 2 to 5 people most likely to handle influencer sponsorship, creator partnerships, affiliate marketing, PR, media, or brand collaborations.\n\n" +
-    "Brand: " +
-    brandName +
-    "\n\nPeople:\n" +
-    JSON.stringify(
-      people.map((p) => ({
-        id: p.id,
-        name: p.name || [p.first_name, p.last_name].filter(Boolean).join(" "),
-        title: p.title
-      })),
-      null,
-      2
-    ) +
-    "\n\nReturn JSON only: {\"ids\":[\"apollo_id_1\"]}";
+  const prompt = buildApolloPocSelectionPrompt(brandName, people, settings);
 
   try {
     const response = await axios.post(
@@ -689,11 +724,60 @@ async function aiSelectApolloPOCs(brandName: string, people: any[]) {
 
     return people.filter((p) => ids.has(String(p.id))).slice(0, 5);
   } catch {
-    return people.slice(0, 5);
+    return fallbackApolloPocSelection(people, settings);
   }
 }
 
-async function discoverApollo(brandName: string, domain: string) {
+async function fetchApolloPeoplePage(
+  domain: string,
+  page: number,
+  perPage: number,
+  settings: AppSettings | null
+) {
+  const key = process.env.APOLLO_API_KEY || "";
+  const baseUrl = process.env.APOLLO_BASE_URL || "https://api.apollo.io/api/v1";
+
+  const body: Record<string, any> = {
+    q_organization_domains: domain,
+    page,
+    per_page: perPage
+  };
+
+  if (settings) {
+    body.person_titles = settings.targetRoleKeywords;
+    body.person_seniorities = [
+      "manager",
+      "senior",
+      "head",
+      "director",
+      "vp",
+      "owner",
+      "partner"
+    ];
+  }
+
+  const response = await axios.post(
+    baseUrl +
+      (process.env.APOLLO_PEOPLE_SEARCH_ENDPOINT || "/mixed_people/api_search"),
+    body,
+    {
+      headers: {
+        "Content-Type": "application/json",
+        "X-Api-Key": key
+      },
+      timeout: 45000,
+      validateStatus: () => true
+    }
+  );
+
+  return response.data?.people || [];
+}
+
+async function discoverApollo(
+  brandName: string,
+  domain: string,
+  settings: AppSettings
+): Promise<ProviderContact[]> {
   const key = process.env.APOLLO_API_KEY || "";
   const baseUrl = process.env.APOLLO_BASE_URL || "https://api.apollo.io/api/v1";
 
@@ -704,27 +788,22 @@ async function discoverApollo(brandName: string, domain: string) {
     const maxResults = Number(process.env.APOLLO_MAX_RESULTS || 100);
     const perPage = Number(process.env.APOLLO_PER_PAGE || 25);
 
+    // Title/seniority-filtered search first; if the filters match nobody at
+    // this domain, fall back to today's unfiltered pull.
+    let useFilters = true;
+
     for (let page = 1; allPeople.length < maxResults; page += 1) {
-      const response = await axios.post(
-        baseUrl +
-          (process.env.APOLLO_PEOPLE_SEARCH_ENDPOINT ||
-            "/mixed_people/api_search"),
-        {
-          q_organization_domains: domain,
-          page,
-          per_page: perPage
-        },
-        {
-          headers: {
-            "Content-Type": "application/json",
-            "X-Api-Key": key
-          },
-          timeout: 45000,
-          validateStatus: () => true
-        }
+      let people = await fetchApolloPeoplePage(
+        domain,
+        page,
+        perPage,
+        useFilters ? settings : null
       );
 
-      const people = response.data?.people || [];
+      if (!people.length && page === 1 && useFilters) {
+        useFilters = false;
+        people = await fetchApolloPeoplePage(domain, page, perPage, null);
+      }
 
       if (!people.length) break;
 
@@ -764,8 +843,8 @@ async function discoverApollo(brandName: string, domain: string) {
       if (people.length < perPage) break;
     }
 
-    const selected = await aiSelectApolloPOCs(brandName, allPeople);
-    const emails: string[] = [];
+    const selected = await aiSelectApolloPOCs(brandName, allPeople, settings);
+    const contacts: ProviderContact[] = [];
 
     for (const person of selected) {
       let email = cleanEmail(person.email);
@@ -828,34 +907,40 @@ async function discoverApollo(brandName: string, domain: string) {
           }
         );
 
-        await saveContact({
-          brandName,
-          domain,
+        contacts.push({
           email,
-          source: "apollo",
           fullName,
-          designation: person.title,
+          role: cleanText(person.title),
+          source: "apollo",
           raw: person
         });
-
-        emails.push(email);
       }
     }
 
-    return uniqueEmails(emails);
+    return contacts;
   } catch {
     return [];
   }
 }
 
-async function discoverProspeo(brandName: string, domain: string) {
+async function discoverProspeo(
+  brandName: string,
+  domain: string,
+  settings: AppSettings
+): Promise<ProviderContact[]> {
   if (!process.env.PROSPEO_API_KEY) return [];
 
   try {
-    const contacts = await searchProspeoContacts(domain);
-    const emails: string[] = [];
+    // Paid enrichment capped relative to the combined provider cap; role
+    // titles come from the same settings list all providers share.
+    const found = await searchProspeoContacts(domain, {
+      titles: settings.targetRoleKeywords,
+      maxContacts: Math.max(settings.providerEmailCap * 2, 10)
+    });
 
-    for (const contact of contacts.slice(0, 10)) {
+    const contacts: ProviderContact[] = [];
+
+    for (const contact of found.slice(0, 10)) {
       const email = cleanEmail(contact.email);
       if (!isValidEmail(email)) continue;
 
@@ -883,20 +968,16 @@ async function discoverProspeo(brandName: string, domain: string) {
         { upsert: true, new: true }
       );
 
-      await saveContact({
-        brandName,
-        domain,
+      contacts.push({
         email,
-        source: "prospeo",
         fullName,
-        designation: title,
+        role: title,
+        source: "prospeo",
         raw: contact.raw || contact
       });
-
-      emails.push(email);
     }
 
-    return uniqueEmails(emails);
+    return contacts;
   } catch (error: any) {
     console.error("Prospeo discovery failed:", error?.response?.data || error.message);
     return [];
@@ -1052,35 +1133,108 @@ export async function discoverEmailsForBrandMap(
   const providersSkipped: string[] = [];
   let collected = [...socialEmails];
 
-  let hunterEmails: string[] = [];
+  let hunterContacts: ProviderContact[] = [];
 
   if (skipPaid && collected.length >= neededEmails) {
     providersSkipped.push("hunter");
   } else {
-    hunterEmails = await discoverHunter(brandName, domain);
-    collected = uniqueEmails([...collected, ...hunterEmails]);
+    hunterContacts = await discoverHunter(brandName, domain, settings);
+    collected = uniqueEmails([
+      ...collected,
+      ...hunterContacts.map((contact) => contact.email)
+    ]);
   }
 
-  let apolloEmails: string[] = [];
+  let apolloContacts: ProviderContact[] = [];
 
   if (skipPaid && collected.length >= neededEmails) {
     providersSkipped.push("apollo");
   } else {
-    apolloEmails = await discoverApollo(brandName, domain);
-    collected = uniqueEmails([...collected, ...apolloEmails]);
+    apolloContacts = await discoverApollo(brandName, domain, settings);
+    collected = uniqueEmails([
+      ...collected,
+      ...apolloContacts.map((contact) => contact.email)
+    ]);
   }
 
-  let prospeoEmails: string[] = [];
+  let prospeoContacts: ProviderContact[] = [];
 
   if (skipPaid && collected.length >= neededEmails) {
     providersSkipped.push("prospeo");
   } else {
-    prospeoEmails = await discoverProspeo(brandName, domain);
-    collected = uniqueEmails([...collected, ...prospeoEmails]);
+    prospeoContacts = await discoverProspeo(brandName, domain, settings);
+    collected = uniqueEmails([
+      ...collected,
+      ...prospeoContacts.map((contact) => contact.email)
+    ]);
   }
 
-  const skippedCellText =
-    "(Skipped — scrape found " + socialEmails.length + " emails)";
+  // Combined selection: at most providerEmailCap contacts across all three
+  // providers, targeted POC roles first. Only the selected ones become
+  // Contacts (the raw provider collections keep everything for audit).
+  const providerPool: ProviderContact[] = [
+    ...hunterContacts,
+    ...apolloContacts,
+    ...prospeoContacts
+  ];
+
+  const selectedContacts = selectProviderContacts(
+    providerPool,
+    settings.providerEmailCap,
+    settings
+  );
+
+  for (const contact of selectedContacts) {
+    await saveContact({
+      brandName,
+      domain,
+      email: contact.email,
+      source: contact.source,
+      fullName: contact.fullName,
+      designation: contact.role,
+      raw: contact.raw
+    });
+  }
+
+  const selectedEmailSet = new Set(
+    selectedContacts.map((contact) => contact.email)
+  );
+
+  const selectedEmailsFor = (contacts: ProviderContact[]) =>
+    uniqueEmails(
+      contacts
+        .map((contact) => contact.email)
+        .filter((email) => selectedEmailSet.has(email))
+    );
+
+  const hunterEmails = selectedEmailsFor(hunterContacts);
+  const apolloEmails = selectedEmailsFor(apolloContacts);
+  const prospeoEmails = selectedEmailsFor(prospeoContacts);
+
+  const providerCellText = (
+    provider: string,
+    found: ProviderContact[],
+    selected: string[]
+  ) => {
+    if (providersSkipped.includes(provider)) {
+      return "(Skipped — scrape found " + socialEmails.length + " emails)";
+    }
+
+    if (found.length === 0) {
+      return "(No " + provider + " emails found)";
+    }
+
+    if (selected.length === 0) {
+      return "(" + found.length + " found, none selected by role filter)";
+    }
+
+    const header =
+      selected.length < found.length
+        ? "(" + selected.length + " of " + found.length + " found selected)\n"
+        : "";
+
+    return header + selected.join("\n");
+  };
 
   const allEmails = uniqueEmails([
     ...socialEmails,
@@ -1106,24 +1260,9 @@ export async function discoverEmailsForBrandMap(
         totalEmails:
           allEmails.length > 0 ? allEmails.join("\n") : "(No emails found)",
 
-        hunter:
-          hunterEmails.length > 0
-            ? hunterEmails.join("\n")
-            : providersSkipped.includes("hunter")
-              ? skippedCellText
-              : "(No Hunter emails found)",
-        apollo:
-          apolloEmails.length > 0
-            ? apolloEmails.join("\n")
-            : providersSkipped.includes("apollo")
-              ? skippedCellText
-              : "(No Apollo emails found)",
-        prospeo:
-          prospeoEmails.length > 0
-            ? prospeoEmails.join("\n")
-            : providersSkipped.includes("prospeo")
-              ? skippedCellText
-              : "(No Prospeo emails found)",
+        hunter: providerCellText("hunter", hunterContacts, hunterEmails),
+        apollo: providerCellText("apollo", apolloContacts, apolloEmails),
+        prospeo: providerCellText("prospeo", prospeoContacts, prospeoEmails),
         prospeoCheckedAt: new Date(),
         prospeoAllCheckedAt: process.env.PROSPEO_ONLY_VERIFIED_EMAIL === "true" ? null : new Date(),
 
@@ -1131,6 +1270,10 @@ export async function discoverEmailsForBrandMap(
         providersSkipped,
         scrapeEmailCount: socialEmails.length,
         scrapeCheckedAt: new Date(),
+        hunterFoundCount: hunterContacts.length,
+        apolloFoundCount: apolloContacts.length,
+        prospeoFoundCount: prospeoContacts.length,
+        providerSelectedCount: selectedContacts.length,
 
         foundVia: brandMap.foundVia || "",
         seedBrandId: brandMap.seedBrandId || null,

@@ -2,6 +2,7 @@ import { Request, Response } from "express";
 import mongoose from "mongoose";
 import { ClosedDeal } from "../models/ClosedDeal.model";
 import { SeedBrand } from "../models/SeedBrand.model";
+import { BrandMap } from "../models/BrandMap.model";
 import { JobLog } from "../models/JobLog.model";
 import { intelligenceQueue } from "../queues/intelligence.queue";
 
@@ -950,6 +951,118 @@ export async function getIntelligenceJobHistory(req: Request, res: Response) {
       success: true,
       count: data.length,
       data
+    });
+  } catch (error: any) {
+    res.status(500).json({
+      success: false,
+      message: error.message
+    });
+  }
+}
+
+// "Start Email Crawling": queue the per-seed discovery → verification →
+// Instantly staging job for all surviving (non-excluded) brands of a seed.
+export async function startEmailCrawlingJob(req: Request, res: Response) {
+  try {
+    const seedBrandId = cleanText(req.params.seedBrandId);
+
+    if (!mongoose.Types.ObjectId.isValid(seedBrandId)) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid seedBrandId"
+      });
+    }
+
+    const seedBrand = await SeedBrand.findById(seedBrandId).lean();
+
+    if (!seedBrand) {
+      return res.status(404).json({
+        success: false,
+        message: "Seed brand not found"
+      });
+    }
+
+    const survivorFilter = {
+      seedBrandId,
+      selectionStatus: { $ne: "excluded" },
+      isExcluded: { $ne: true },
+      domain: { $exists: true, $nin: ["", "-", null, "N/A", "unspecified"] }
+    };
+
+    const survivorCount = await (BrandMap as any).countDocuments(survivorFilter);
+
+    if (survivorCount === 0) {
+      return res.status(400).json({
+        success: false,
+        message:
+          "No surviving brands for this seed — run a crawl first or reset excluded brands in the Brand Map."
+      });
+    }
+
+    // Double-click guard: one active email crawl per seed.
+    const activeLog = await JobLog.findOne({
+      "raw.kind": "process-seed-brands",
+      "raw.seedBrandId": seedBrandId,
+      status: { $in: ["queued", "running", "paused"] }
+    }).lean();
+
+    if (activeLog) {
+      return res.status(409).json({
+        success: false,
+        message:
+          "Email crawling is already " +
+          activeLog.status +
+          " for this seed (job " +
+          activeLog.jobId +
+          ")."
+      });
+    }
+
+    const requestedBy = String((req as any).user?.email || "");
+
+    const job = await intelligenceQueue.add(
+      "process-seed-brands",
+      {
+        seedBrandId,
+        requestedBy
+      },
+      {
+        attempts: 1,
+        removeOnComplete: false,
+        removeOnFail: false
+      }
+    );
+
+    await JobLog.findOneAndUpdate(
+      { jobId: String(job.id) },
+      {
+        $set: {
+          jobId: String(job.id),
+          seedBrandId,
+          type: "intelligence",
+          brandName: "Email crawl: " + (seedBrand.brandName || ""),
+          status: "queued",
+          currentStep: "QUEUED",
+          progress: 0,
+          totalFound: survivorCount,
+          message: "Email crawling queued for " + survivorCount + " brand(s)",
+          startedAt: new Date(),
+          raw: {
+            kind: "process-seed-brands",
+            seedBrandId,
+            requestedBy,
+            seedBrand
+          }
+        }
+      },
+      { upsert: true, returnDocument: "after" }
+    );
+
+    res.status(201).json({
+      success: true,
+      jobId: String(job.id),
+      seedBrandId,
+      queued: survivorCount
     });
   } catch (error: any) {
     res.status(500).json({

@@ -809,10 +809,10 @@ function ImportedLeadsTable({
         </div>
       </div>
 
-      <div className="overflow-x-auto">
+      <div className="max-h-[70vh] overflow-auto">
         <table className="min-w-[1150px] w-full border-separate border-spacing-0">
           <thead>
-            <tr className="bg-slate-50 text-left text-xs font-semibold text-slate-500">
+            <tr className="text-left text-xs font-semibold text-slate-500">
               {[
                 "First Name",
                 "Email",
@@ -826,7 +826,7 @@ function ImportedLeadsTable({
               ].map((head) => (
                 <th
                   key={head}
-                  className="border-b border-slate-200 px-4 py-3 whitespace-nowrap"
+                  className="sticky top-0 z-20 border-b border-slate-200 bg-slate-50 px-4 py-3 whitespace-nowrap"
                 >
                   {head}
                 </th>

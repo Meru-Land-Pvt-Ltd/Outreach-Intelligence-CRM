@@ -7,6 +7,7 @@ import {
   normalizeBrandName as normalizeExcludedBrandName,
   normalizeDomain as normalizeExcludedDomain
 } from "../utils/normalize";
+import { normalizeNiche } from "./nicheNormalizer.service";
 import {
   findOfficialDomainForBrand,
   cleanDomain,
@@ -452,9 +453,13 @@ export async function buildBrandMapForSeedBrand(
 
     const mostRecentSponsorshipDate = getLatestDate(brandVideos);
 
-    const niche = mostCommon(
+    const nicheRaw = mostCommon(
       brandVideos.map((video: any) => video.channelCategory)
     );
+
+    const niche = settings.nicheNormalization
+      ? await normalizeNiche(nicheRaw, settings)
+      : nicheRaw;
 
     const foundVia = brandVideos[0]?.seedBrandName || "";
 
@@ -475,6 +480,7 @@ export async function buildBrandMapForSeedBrand(
           mostRecentSponsorshipDate,
           recencyTag: getRecencyTag(mostRecentSponsorshipDate),
           niche,
+          nicheRaw,
           domain,
 
           productNames,

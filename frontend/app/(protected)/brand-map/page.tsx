@@ -25,10 +25,17 @@ type BrandMapRow = {
   niche?: string;
   domain?: string;
   selectionStatus?: string;
-  intentScore?: number;
-  intentSummary?: string;
-  intentStatus?: string;
-  intentCheckedAt?: string;
+  selectionUpdatedBy?: string;
+  pgaScore?: number;
+  pgaSubScores?: {
+    productLaunch?: number;
+    creatorCollab?: number;
+    promoActivity?: number;
+    usAvailability?: number;
+  };
+  pgaSummary?: string;
+  pgaStatus?: string;
+  pgaCheckedAt?: string;
   createdAt?: string;
   updatedAt?: string;
 };
@@ -150,55 +157,75 @@ function RecencyBadge({ value }: { value?: string }) {
 
 function SelectionBadge({ row }: { row: BrandMapRow }) {
   const status = getSelectionStatus(row);
+  const autoGated =
+    status === "excluded" && clean(row.selectionUpdatedBy) === "pga-gate";
 
   return (
-    <Badge
-      className={cn(
-        "rounded-full px-2.5 py-1 text-xs font-semibold capitalize",
-        status === "approved" &&
-          "bg-emerald-50 text-emerald-700 hover:bg-emerald-50",
-        status === "excluded" && "bg-rose-50 text-rose-700 hover:bg-rose-50",
-        status === "pending" && "bg-slate-100 text-slate-600 hover:bg-slate-100"
-      )}
+    <span
+      title={
+        autoGated
+          ? `Auto-excluded by the PGA gate (score ${row.pgaScore ?? "?"}). Select the row and press Reset to bring it back.`
+          : undefined
+      }
     >
-      {status}
-    </Badge>
+      <Badge
+        className={cn(
+          "rounded-full px-2.5 py-1 text-xs font-semibold capitalize",
+          status === "approved" &&
+            "bg-emerald-50 text-emerald-700 hover:bg-emerald-50",
+          status === "excluded" && "bg-rose-50 text-rose-700 hover:bg-rose-50",
+          status === "pending" && "bg-slate-100 text-slate-600 hover:bg-slate-100"
+        )}
+      >
+        {autoGated ? `auto-excluded (${row.pgaScore ?? "?"})` : status}
+      </Badge>
+    </span>
   );
 }
 
-function IntentBadge({ row }: { row: BrandMapRow }) {
-  if (row.intentStatus === "running") {
+function PgaBadge({ row }: { row: BrandMapRow }) {
+  if (row.pgaStatus === "running") {
     return (
       <Badge className="rounded-full bg-blue-50 px-2.5 py-1 text-xs font-semibold text-blue-700 hover:bg-blue-50">
-        Scanning…
+        Scoring…
       </Badge>
     );
   }
 
-  const score = Number(row.intentScore);
+  const score = Number(row.pgaScore);
 
   if (!Number.isFinite(score)) {
     return (
       <span
         className="text-sm font-medium text-slate-400"
-        title={row.intentStatus === "failed" ? "Last scan failed" : "Not scanned yet"}
+        title={row.pgaStatus === "failed" ? "Last PGA scan failed" : "Not scored yet"}
       >
-        {row.intentStatus === "failed" ? "failed" : "—"}
+        {row.pgaStatus === "failed" ? "failed" : "—"}
       </span>
     );
   }
 
+  const sub = row.pgaSubScores || {};
+  const tooltip = [
+    `Launch: ${sub.productLaunch ?? "-"}`,
+    `Creator collabs: ${sub.creatorCollab ?? "-"}`,
+    `Promos: ${sub.promoActivity ?? "-"}`,
+    `US availability: ${sub.usAvailability ?? "-"}`,
+    "",
+    row.pgaSummary || "",
+  ].join("\n");
+
   return (
-    <span title={row.intentSummary || ""}>
+    <span title={tooltip}>
       <Badge
         className={cn(
           "rounded-full px-2.5 py-1 text-xs font-semibold",
           score >= 70 && "bg-emerald-50 text-emerald-700 hover:bg-emerald-50",
-          score >= 40 && score < 70 && "bg-amber-50 text-amber-700 hover:bg-amber-50",
-          score < 40 && "bg-slate-100 text-slate-600 hover:bg-slate-100"
+          score >= 35 && score < 70 && "bg-amber-50 text-amber-700 hover:bg-amber-50",
+          score < 35 && "bg-rose-50 text-rose-700 hover:bg-rose-50"
         )}
       >
-        {score} · {score >= 70 ? "Hot" : score >= 40 ? "Warm" : "Cold"}
+        PGA {score}
       </Badge>
     </span>
   );
@@ -227,12 +254,12 @@ export default function BrandMapPage() {
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [bulkBusy, setBulkBusy] = useState("");
   const [scrapingId, setScrapingId] = useState("");
-  const [intentBusyId, setIntentBusyId] = useState("");
-  const [intentJob, setIntentJob] = useState<{
+  const [pgaBusyId, setPgaBusyId] = useState("");
+  const [pgaJob, setPgaJob] = useState<{
     jobId: string;
     total: number;
   } | null>(null);
-  const [intentProgress, setIntentProgress] = useState(0);
+  const [pgaProgress, setPgaProgress] = useState(0);
 
   const [page, setPage] = useState(1);
 
@@ -445,21 +472,21 @@ export default function BrandMapPage() {
     setBulkBusy("");
   }
 
-  async function findIntent(row: BrandMapRow) {
+  async function findPga(row: BrandMapRow) {
     const id = clean(row._id);
 
     if (!id) return;
 
-    setIntentBusyId(id);
+    setPgaBusyId(id);
     setNotice(null);
 
     setBrands((prev) =>
       prev.map((brand) =>
-        clean(brand._id) === id ? { ...brand, intentStatus: "running" } : brand
+        clean(brand._id) === id ? { ...brand, pgaStatus: "running" } : brand
       )
     );
 
-    const response: any = await apiPost(`/brand-map/${id}/intent`, {});
+    const response: any = await apiPost(`/brand-map/${id}/pga`, {});
 
     if (response?.success && response.data) {
       setBrands((prev) =>
@@ -471,25 +498,25 @@ export default function BrandMapPage() {
       if (response.cached) {
         setNotice({
           type: "success",
-          text: `${row.brandName || "Brand"}: using a recent intent score (rescans are cached for a few days).`,
+          text: `${row.brandName || "Brand"}: using a recent PGA score (rescans are cached).`,
         });
       }
     } else {
       setBrands((prev) =>
         prev.map((brand) =>
-          clean(brand._id) === id ? { ...brand, intentStatus: "failed" } : brand
+          clean(brand._id) === id ? { ...brand, pgaStatus: "failed" } : brand
         )
       );
       setNotice({
         type: "error",
-        text: response?.message || "Intent scan failed.",
+        text: response?.message || "PGA scan failed.",
       });
     }
 
-    setIntentBusyId("");
+    setPgaBusyId("");
   }
 
-  async function findIntentForSelected() {
+  async function findPgaForSelected() {
     const ids = Array.from(selectedIds).slice(0, 50);
 
     if (ids.length === 0) return;
@@ -497,61 +524,61 @@ export default function BrandMapPage() {
     if (selectedIds.size > 50) {
       setNotice({
         type: "error",
-        text: "Intent scans run at most 50 brands per batch — the first 50 selected will be scanned.",
+        text: "PGA scans run at most 50 brands per batch — the first 50 selected will be scored.",
       });
     }
 
-    setBulkBusy("intent");
+    setBulkBusy("pga");
 
-    const response: any = await apiPost("/brand-map/intent-bulk", { ids });
+    const response: any = await apiPost("/brand-map/pga-bulk", { ids });
 
     if (response?.success) {
       if (Number(response.queued || 0) === 0) {
         setNotice({
           type: "success",
-          text: "All selected brands already have a recent intent score.",
+          text: "All selected brands already have a recent PGA score.",
         });
         setBulkBusy("");
         return;
       }
 
-      setIntentJob({ jobId: response.jobId, total: Number(response.queued) });
-      setIntentProgress(0);
+      setPgaJob({ jobId: response.jobId, total: Number(response.queued) });
+      setPgaProgress(0);
       setNotice({
         type: "success",
-        text: `Intent scan started for ${response.queued} brand(s)… this runs one brand at a time.`,
+        text: `PGA scoring started for ${response.queued} brand(s)… this runs one brand at a time.`,
       });
     } else {
       setNotice({
         type: "error",
-        text: response?.message || "Failed to start intent scans.",
+        text: response?.message || "Failed to start PGA scoring.",
       });
       setBulkBusy("");
     }
   }
 
   useEffect(() => {
-    if (!intentJob) return;
+    if (!pgaJob) return;
 
     const timer = window.setInterval(async () => {
-      const status: any = await apiGet(`/brand-map/intent-bulk/${intentJob.jobId}`);
+      const status: any = await apiGet(`/brand-map/pga-bulk/${pgaJob.jobId}`);
 
       if (!status?.success) {
         window.clearInterval(timer);
-        setIntentJob(null);
+        setPgaJob(null);
         setBulkBusy("");
         return;
       }
 
-      setIntentProgress(Number(status.processed || 0) + Number(status.failed || 0));
+      setPgaProgress(Number(status.processed || 0) + Number(status.failed || 0));
 
       if (status.done) {
         window.clearInterval(timer);
-        setIntentJob(null);
+        setPgaJob(null);
         setBulkBusy("");
         setNotice({
           type: "success",
-          text: `Intent scan finished: ${status.processed} scored${
+          text: `PGA scoring finished: ${status.processed} scored${
             status.failed ? `, ${status.failed} failed` : ""
           }.`,
         });
@@ -560,7 +587,7 @@ export default function BrandMapPage() {
     }, 3000);
 
     return () => window.clearInterval(timer);
-  }, [intentJob]);
+  }, [pgaJob]);
 
   async function runScrape(row: BrandMapRow) {
     const id = clean(row._id);
@@ -696,11 +723,11 @@ export default function BrandMapPage() {
         render: (brand) => <RecencyBadge value={brand.recencyTag} />,
       },
       {
-        id: "intent",
-        header: "Intent",
+        id: "pga",
+        header: "PGA",
         align: "center",
         widthClassName: "min-w-[120px]",
-        render: (brand) => <IntentBadge row={brand} />,
+        render: (brand) => <PgaBadge row={brand} />,
       },
       {
         id: "actions",
@@ -710,8 +737,7 @@ export default function BrandMapPage() {
         render: (brand) => {
           const id = clean(brand._id);
           const scrapeBusy = scrapingId === id;
-          const intentBusy =
-            intentBusyId === id || brand.intentStatus === "running";
+          const pgaBusy = pgaBusyId === id || brand.pgaStatus === "running";
 
           return (
             <div className="flex items-center justify-center gap-1.5">
@@ -736,20 +762,20 @@ export default function BrandMapPage() {
                 type="button"
                 size="xs"
                 variant="outline"
-                disabled={intentBusy}
-                title="Scan recent public activity and score how likely this brand is to buy influencer outreach now"
-                onClick={() => findIntent(brand)}
+                disabled={pgaBusy}
+                title="Rate the brand on product launches, creator collabs, promo activity and US availability (AI web search)"
+                onClick={() => findPga(brand)}
                 className="h-8 rounded-md !border-violet-200 !text-violet-700 hover:!bg-violet-50"
               >
                 <Sparkles className="mr-1.5 h-3.5 w-3.5" />
-                {intentBusy ? "Scanning..." : "Find Intent"}
+                {pgaBusy ? "Scoring..." : "PGA Score"}
               </Button>
             </div>
           );
         },
       },
     ],
-    [allFilteredSelected, selectedIds, scrapingId, intentBusyId, filteredIds]
+    [allFilteredSelected, selectedIds, scrapingId, pgaBusyId, filteredIds]
   );
 
   return (
@@ -865,15 +891,15 @@ export default function BrandMapPage() {
               size="sm"
               variant="outline"
               disabled={Boolean(bulkBusy)}
-              onClick={findIntentForSelected}
+              onClick={findPgaForSelected}
               className="h-9 rounded-md !border-violet-200 !text-violet-700 hover:!bg-violet-50"
             >
               <Sparkles className="mr-1.5 h-3.5 w-3.5" />
-              {bulkBusy === "intent"
-                ? intentJob
-                  ? `Scanning ${intentProgress}/${intentJob.total}...`
+              {bulkBusy === "pga"
+                ? pgaJob
+                  ? `Scoring ${pgaProgress}/${pgaJob.total}...`
                   : "Starting..."
-                : "Find Intent"}
+                : "PGA Score"}
             </Button>
 
             <Button

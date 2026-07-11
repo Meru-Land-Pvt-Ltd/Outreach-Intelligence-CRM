@@ -2,7 +2,7 @@
 
 import type { FormEvent } from "react";
 import { useEffect, useMemo, useState } from "react";
-import { Pause, Play, Plus, Settings2, Square } from "lucide-react";
+import { Mail, Pause, Play, Plus, Settings2, Square } from "lucide-react";
 import { apiGet, apiPost, apiPut } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -300,7 +300,92 @@ type PipelineSettings = {
   scrapeFirstSkipPaid: boolean;
   scrapeSkipThreshold: number;
   coolingOffMonths: number;
+  pgaAutoScore: boolean;
+  pgaMinScore: number;
+  pgaCacheDays: number;
+  pgaConcurrency: number;
+  pgaModel: string;
+  providerEmailCap: number;
+  targetRoleKeywords: string[];
+  excludeRoleKeywords: string[];
+  targetSeniorityKeywords: string[];
+  canonicalNiches: string[];
+  nicheNormalization: boolean;
 };
+
+function SettingsTextField({
+  label,
+  value,
+  placeholder,
+  onChange,
+}: {
+  label: string;
+  value: string;
+  placeholder?: string;
+  onChange: (value: string) => void;
+}) {
+  return (
+    <label className="space-y-2">
+      <span className="text-sm font-semibold text-slate-800">{label}</span>
+      <Input
+        value={value}
+        placeholder={placeholder}
+        onChange={(e) => onChange(e.target.value)}
+        className="h-11 border-slate-200"
+      />
+    </label>
+  );
+}
+
+function SettingsTextListField({
+  label,
+  hint,
+  values,
+  onChange,
+}: {
+  label: string;
+  hint: string;
+  values: string[];
+  onChange: (values: string[]) => void;
+}) {
+  return (
+    <label className="space-y-2">
+      <span className="block text-sm font-semibold text-slate-800">{label}</span>
+      <span className="block text-xs font-medium text-slate-500">{hint}</span>
+      <textarea
+        value={(values || []).join("\n")}
+        onChange={(e) => onChange(e.target.value.split(/\n/))}
+        onBlur={(e) =>
+          onChange(
+            e.target.value
+              .split(/[\n,]+/)
+              .map((item) => item.trim())
+              .filter(Boolean)
+          )
+        }
+        rows={5}
+        className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm font-medium text-slate-800 focus:outline-none focus:ring-4 focus:ring-blue-50"
+      />
+    </label>
+  );
+}
+
+function SettingsSection({
+  title,
+  children,
+}: {
+  title: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <div className="space-y-3 rounded-xl border border-slate-100 bg-slate-50/40 p-4">
+      <h3 className="text-sm font-bold uppercase tracking-wide text-slate-600">
+        {title}
+      </h3>
+      {children}
+    </div>
+  );
+}
 
 function SettingsNumberField({
   label,
@@ -435,51 +520,150 @@ function PipelineSettingsCard() {
             </p>
           ) : (
             <>
-              <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
-                <SettingsToggleField
-                  label="Manual brand selection"
-                  hint="Crawls stop at the Brand Map. Email discovery and Instantly export run only for brands you approve."
-                  checked={settings.manualSelectionMode}
-                  onChange={(value) => update("manualSelectionMode", value)}
-                />
-                <SettingsToggleField
-                  label="Website scrape first"
-                  hint="Skip paid providers (Hunter, Apollo, Prospeo) when the free website scrape already found enough emails."
-                  checked={settings.scrapeFirstSkipPaid}
-                  onChange={(value) => update("scrapeFirstSkipPaid", value)}
-                />
-              </div>
+              <SettingsSection title="Pipeline">
+                <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
+                  <SettingsToggleField
+                    label="Manual email crawling"
+                    hint="Crawls stop at the Brand Map. Email discovery runs only when you press Start Email Crawling (or send selected brands)."
+                    checked={settings.manualSelectionMode}
+                    onChange={(value) => update("manualSelectionMode", value)}
+                  />
+                  <div className="grid grid-cols-2 gap-4">
+                    <SettingsNumberField
+                      label="Max brands per seed"
+                      value={settings.maxBrandsPerSeed}
+                      min={10}
+                      max={500}
+                      onChange={(value) => update("maxBrandsPerSeed", value)}
+                    />
+                    <SettingsNumberField
+                      label="Cooling-off months"
+                      value={settings.coolingOffMonths}
+                      min={1}
+                      max={24}
+                      onChange={(value) => update("coolingOffMonths", value)}
+                    />
+                  </div>
+                </div>
+              </SettingsSection>
 
-              <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
-                <SettingsNumberField
-                  label="Max brands per seed"
-                  value={settings.maxBrandsPerSeed}
-                  min={10}
-                  max={500}
-                  onChange={(value) => update("maxBrandsPerSeed", value)}
+              <SettingsSection title="PGA Scoring">
+                <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
+                  <SettingsToggleField
+                    label="Auto-score brands during crawls"
+                    hint="Every crawled brand gets a PGA score (AI web search, ~20-60s per brand). Brands below the minimum are auto-excluded."
+                    checked={settings.pgaAutoScore}
+                    onChange={(value) => update("pgaAutoScore", value)}
+                  />
+                  <div className="grid grid-cols-3 gap-4">
+                    <SettingsNumberField
+                      label="Min PGA score"
+                      value={settings.pgaMinScore}
+                      min={0}
+                      max={100}
+                      onChange={(value) => update("pgaMinScore", value)}
+                    />
+                    <SettingsNumberField
+                      label="Cache (days)"
+                      value={settings.pgaCacheDays}
+                      min={1}
+                      max={365}
+                      onChange={(value) => update("pgaCacheDays", value)}
+                    />
+                    <SettingsNumberField
+                      label="Concurrency"
+                      value={settings.pgaConcurrency}
+                      min={1}
+                      max={8}
+                      onChange={(value) => update("pgaConcurrency", value)}
+                    />
+                  </div>
+                </div>
+                <SettingsTextField
+                  label="PGA model override"
+                  value={settings.pgaModel}
+                  placeholder="Leave empty for the default OpenAI model"
+                  onChange={(value) => update("pgaModel", value)}
                 />
-                <SettingsNumberField
-                  label="Max emails per brand"
-                  value={settings.maxEmailsPerBrand}
-                  min={1}
-                  max={10}
-                  onChange={(value) => update("maxEmailsPerBrand", value)}
-                />
-                <SettingsNumberField
-                  label="Scrape skip threshold"
-                  value={settings.scrapeSkipThreshold}
-                  min={1}
-                  max={10}
-                  onChange={(value) => update("scrapeSkipThreshold", value)}
-                />
-                <SettingsNumberField
-                  label="Cooling-off months"
-                  value={settings.coolingOffMonths}
-                  min={1}
-                  max={24}
-                  onChange={(value) => update("coolingOffMonths", value)}
-                />
-              </div>
+              </SettingsSection>
+
+              <SettingsSection title="Email Discovery">
+                <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
+                  <SettingsToggleField
+                    label="Website scrape first"
+                    hint="Skip paid providers (Hunter, Apollo, Prospeo) when the free website scrape already found enough emails."
+                    checked={settings.scrapeFirstSkipPaid}
+                    onChange={(value) => update("scrapeFirstSkipPaid", value)}
+                  />
+                  <div className="grid grid-cols-3 gap-4">
+                    <SettingsNumberField
+                      label="Pushed per brand"
+                      value={settings.maxEmailsPerBrand}
+                      min={1}
+                      max={10}
+                      onChange={(value) => update("maxEmailsPerBrand", value)}
+                    />
+                    <SettingsNumberField
+                      label="Provider cap"
+                      value={settings.providerEmailCap}
+                      min={1}
+                      max={20}
+                      onChange={(value) => update("providerEmailCap", value)}
+                    />
+                    <SettingsNumberField
+                      label="Scrape threshold"
+                      value={settings.scrapeSkipThreshold}
+                      min={1}
+                      max={10}
+                      onChange={(value) => update("scrapeSkipThreshold", value)}
+                    />
+                  </div>
+                </div>
+                <p className="text-xs font-medium text-slate-500">
+                  "Pushed per brand" caps emails sent to Instantly per brand.
+                  "Provider cap" caps combined contacts collected from Hunter +
+                  Apollo + Prospeo per brand (scraped emails don't count).
+                </p>
+                <div className="grid grid-cols-1 gap-4 lg:grid-cols-3">
+                  <SettingsTextListField
+                    label="Target roles"
+                    hint="POC role keywords to collect (one per line)."
+                    values={settings.targetRoleKeywords}
+                    onChange={(values) => update("targetRoleKeywords", values)}
+                  />
+                  <SettingsTextListField
+                    label="Excluded roles"
+                    hint="Roles never collected (accounts, legal, HR…)."
+                    values={settings.excludeRoleKeywords}
+                    onChange={(values) => update("excludeRoleKeywords", values)}
+                  />
+                  <SettingsTextListField
+                    label="Seniority keywords"
+                    hint="Preferred seniority levels (manager, head, director…)."
+                    values={settings.targetSeniorityKeywords}
+                    onChange={(values) =>
+                      update("targetSeniorityKeywords", values)
+                    }
+                  />
+                </div>
+              </SettingsSection>
+
+              <SettingsSection title="Niches">
+                <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
+                  <SettingsToggleField
+                    label="Normalize niches"
+                    hint="Map AI-generated niche labels onto the standard categories below so filters and campaign tags stay clean."
+                    checked={settings.nicheNormalization}
+                    onChange={(value) => update("nicheNormalization", value)}
+                  />
+                  <SettingsTextListField
+                    label="Standard niche categories"
+                    hint="Canonical niche list (one per line)."
+                    values={settings.canonicalNiches}
+                    onChange={(values) => update("canonicalNiches", values)}
+                  />
+                </div>
+              </SettingsSection>
 
               <div className="flex justify-end">
                 <Button onClick={handleSave} disabled={saving}>
@@ -508,6 +692,7 @@ export default function ControlPanelPage() {
   const [recentPage, setRecentPage] = useState(1);
   const [activePage, setActivePage] = useState(1);
   const [runCaps, setRunCaps] = useState<Record<string, string>>({});
+  const [startingEmailSeedId, setStartingEmailSeedId] = useState("");
 
   const [form, setForm] = useState({
     month: "",
@@ -743,6 +928,62 @@ export default function ControlPanelPage() {
     }
 
     setRunningSeedBrandId("");
+  }
+
+  async function handleStartEmailCrawling(seedDeal: SeedDeal) {
+    const seedBrandId = getSeedBrandId(seedDeal);
+
+    if (!seedBrandId) {
+      setNotice({
+        type: "error",
+        text: "Seed brand ID missing. Please check backend response for this seed deal.",
+      });
+      return;
+    }
+
+    if (
+      !window.confirm(
+        `Start email crawling for all surviving brands of "${clean(
+          seedDeal.brandName
+        )}"? Email discovery, verification and Instantly staging will run brand by brand — paid provider credits may be used.`
+      )
+    ) {
+      return;
+    }
+
+    setStartingEmailSeedId(seedBrandId);
+    setNotice(null);
+
+    try {
+      const response: any = await apiPost(
+        `/jobs/start-email-crawling/${seedBrandId}`,
+        {}
+      );
+
+      if (!response?.success) {
+        setNotice({
+          type: "error",
+          text: response?.message || "Failed to start email crawling.",
+        });
+        setStartingEmailSeedId("");
+        return;
+      }
+
+      setNotice({
+        type: "success",
+        text: `Email crawling queued for ${response.queued} brand(s). Track progress in Active.`,
+      });
+
+      setActivePage(1);
+      await refreshAll();
+    } catch {
+      setNotice({
+        type: "error",
+        text: "Failed to start email crawling.",
+      });
+    }
+
+    setStartingEmailSeedId("");
   }
 
   const visibleSeedDeals = useMemo(() => {
@@ -1169,6 +1410,7 @@ export default function ControlPanelPage() {
             render: (row) => {
               const seedBrandId = getSeedBrandId(row);
               const isRunning = runningSeedBrandId === seedBrandId;
+              const isStartingEmail = startingEmailSeedId === seedBrandId;
 
               return (
                 <div className="flex items-center justify-end gap-2">
@@ -1197,6 +1439,19 @@ export default function ControlPanelPage() {
                   >
                     <Play className="mr-2 h-3.5 w-3.5 fill-current" />
                     {isRunning ? "Running..." : "Run Crawl"}
+                  </Button>
+
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="outline"
+                    disabled={isStartingEmail}
+                    title="Run email discovery, verification and Instantly staging for all surviving brands of this seed"
+                    onClick={() => handleStartEmailCrawling(row)}
+                    className="h-9 rounded-md !border-emerald-300 !text-emerald-700 hover:!bg-emerald-50"
+                  >
+                    <Mail className="mr-2 h-3.5 w-3.5" />
+                    {isStartingEmail ? "Starting..." : "Start Email Crawling"}
                   </Button>
                 </div>
               );

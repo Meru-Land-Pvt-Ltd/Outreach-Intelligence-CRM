@@ -4,6 +4,7 @@ import { Worker } from "bullmq";
 import { intelligenceProcessor } from "./processors/intelligence.processor";
 import {
   discoverEmailsJob,
+  processSeedBrandsJob,
   processSelectedBrandsJob
 } from "./processors/manualActions.processor";
 
@@ -41,6 +42,10 @@ async function startWorker() {
 
       if (job.name === "process-selected-brands") {
         return processSelectedBrandsJob(job, token);
+      }
+
+      if (job.name === "process-seed-brands") {
+        return processSeedBrandsJob(job, token);
       }
 
       if (job.name === "discover-emails") {

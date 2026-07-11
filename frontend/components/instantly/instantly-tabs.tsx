@@ -3,11 +3,10 @@
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import {
-  AlertTriangle,
   FileText,
+  FolderKanban,
   LayoutDashboard,
   ListChecks,
-  Send,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 
@@ -17,6 +16,16 @@ const tabs = [
     href: "/instantly-campaigns",
     icon: LayoutDashboard,
     exact: true,
+  },
+  {
+    label: "Enoylity Campaigns",
+    href: "/instantly-campaigns/campaigns/enoylity",
+    icon: FolderKanban,
+  },
+  {
+    label: "MHD Campaigns",
+    href: "/instantly-campaigns/campaigns/mhd",
+    icon: FolderKanban,
   },
   {
     label: "Enoylity Template",

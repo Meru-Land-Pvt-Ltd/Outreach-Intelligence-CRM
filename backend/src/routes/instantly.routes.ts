@@ -6,13 +6,16 @@ import {
   getBounceEvents,
   getImportedLeads,
   getInstantlyCampaigns,
+  getInstantlyCampaignLeads,
   getInstantlyExportStatus,
   getInstantlyLeads,
   getPushLogs,
   getSenders,
   getTemplatePreview,
   getTemplates,
+  previewSelectedCampaign,
   pullBouncedFromInstantly,
+  pushSelectedCampaign,
   pushToInstantly,
   releasePushedLeads,
   saveTemplate,
@@ -46,6 +49,9 @@ router.post("/batch-push", batchPushCampaigns);
 router.post("/batch", batchPushCampaigns);
 
 router.get("/campaigns", getInstantlyCampaigns);
+router.get("/campaigns/:id/leads", getInstantlyCampaignLeads);
+router.post("/push-preview", previewSelectedCampaign);
+router.post("/push-selected", pushSelectedCampaign);
 router.get("/push-logs", getPushLogs);
 
 router.get("/bounces", getBounceEvents);
