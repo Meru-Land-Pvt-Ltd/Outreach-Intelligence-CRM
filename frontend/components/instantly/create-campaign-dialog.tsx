@@ -45,11 +45,22 @@ function plusDays(days: number) {
   return d.toISOString().slice(0, 10);
 }
 
-function stripHtml(value?: string) {
-  return String(value || "")
-    .replace(/<[^>]+>/g, "")
-    .replace(/&nbsp;/g, " ")
-    .trim();
+// The template body/follow-ups are HTML (with entities like &#39;). Render
+// them so paragraphs, links and apostrophes display as the real email, rather
+// than tag-stripping into an unstructured wall of text.
+function EmailHtmlBlock({ html }: { html?: string }) {
+  const content = String(html || "").trim();
+
+  if (!content) {
+    return <p className="text-sm text-slate-400">—</p>;
+  }
+
+  return (
+    <div
+      className="max-h-72 overflow-auto rounded-lg border border-slate-200 bg-white p-4 text-sm leading-6 text-slate-700 [&_a]:break-all [&_a]:text-blue-600 [&_a]:underline [&_ol]:my-2 [&_ol]:list-decimal [&_ol]:pl-5 [&_p]:my-2 [&_ul]:my-2 [&_ul]:list-disc [&_ul]:pl-5"
+      dangerouslySetInnerHTML={{ __html: content }}
+    />
+  );
 }
 
 export function CreateCampaignDialog({
@@ -481,16 +492,55 @@ export function CreateCampaignDialog({
                   Loading email preview…
                 </p>
               ) : leadPreview ? (
-                <div className="space-y-3 rounded-xl border border-slate-200 bg-white p-4">
-                  <p className="text-xs font-bold uppercase tracking-wide text-slate-500">
-                    Email preview · {leadPreview.email}
-                  </p>
-                  <p className="text-sm font-semibold text-slate-900">
-                    {leadPreview.subject || "-"}
-                  </p>
-                  <pre className="max-h-56 overflow-auto whitespace-pre-wrap rounded-lg border border-slate-200 bg-slate-50 p-3 text-sm leading-6 text-slate-700">
-                    {stripHtml(leadPreview.body) || "-"}
-                  </pre>
+                <div className="space-y-4 rounded-xl border border-slate-200 bg-slate-50/60 p-4">
+                  <div>
+                    <p className="text-xs font-bold uppercase tracking-wide text-slate-500">
+                      Email preview
+                    </p>
+                    <p className="mt-0.5 text-xs font-medium text-slate-500">
+                      To: {leadPreview.email}
+                    </p>
+                  </div>
+
+                  <div>
+                    <p className="text-[11px] font-bold uppercase tracking-wide text-slate-400">
+                      Subject
+                    </p>
+                    <p className="mt-1 rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm font-semibold text-slate-900">
+                      {leadPreview.subject || "—"}
+                    </p>
+                  </div>
+
+                  <div>
+                    <p className="text-[11px] font-bold uppercase tracking-wide text-slate-400">
+                      Body
+                    </p>
+                    <div className="mt-1">
+                      <EmailHtmlBlock html={leadPreview.body} />
+                    </div>
+                  </div>
+
+                  {leadPreview.followUp1 ? (
+                    <div>
+                      <p className="text-[11px] font-bold uppercase tracking-wide text-slate-400">
+                        Follow-up 1
+                      </p>
+                      <div className="mt-1">
+                        <EmailHtmlBlock html={leadPreview.followUp1} />
+                      </div>
+                    </div>
+                  ) : null}
+
+                  {leadPreview.followUp2 ? (
+                    <div>
+                      <p className="text-[11px] font-bold uppercase tracking-wide text-slate-400">
+                        Follow-up 2
+                      </p>
+                      <div className="mt-1">
+                        <EmailHtmlBlock html={leadPreview.followUp2} />
+                      </div>
+                    </div>
+                  ) : null}
                 </div>
               ) : null}
             </div>
