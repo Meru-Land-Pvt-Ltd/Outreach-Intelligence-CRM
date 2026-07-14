@@ -84,6 +84,7 @@ export async function getRawYoutubeVideos(req: Request, res: Response) {
     const [totalItems, videos] = await Promise.all([
       RawYoutubeVideo.countDocuments(filter),
       RawYoutubeVideo.find(filter)
+        .select("-raw")
         .sort(sort)
         .skip(skip)
         .limit(limit)

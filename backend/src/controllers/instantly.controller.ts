@@ -2109,8 +2109,10 @@ export async function getInstantlyLeads(req: Request, res: Response) {
         : 2000;
 
     const rows = await InstantlyLeadModel.find(filter)
+      .select("-raw -releaseHistory")
       .sort({ createdAt: -1 })
-      .limit(limit);
+      .limit(limit)
+      .lean();
 
 
     const data = rows.map((row: any) => {
@@ -3286,7 +3288,10 @@ export async function getInstantlyCampaigns(req: Request, res: Response) {
       filter.channel = channel;
     }
 
+    // raw carries the full Instantly create payload (template HTML etc.) —
+    // never rendered on the campaigns list.
     const rows = await InstantlyCampaignModel.find(filter)
+      .select("-raw")
       .sort({ createdAt: -1 })
       .limit(1000)
       .lean();
@@ -3380,6 +3385,7 @@ export async function getInstantlyCampaignLeads(req: Request, res: Response) {
       channel: campaign.channel,
       campaignId: campaign.instantlyCampaignId
     })
+      .select("-raw -releaseHistory")
       .sort({ pushedAt: -1, createdAt: -1 })
       .lean();
 
@@ -3568,8 +3574,10 @@ export async function pushSelectedCampaign(req: Request, res: Response) {
 export async function getPushLogs(req: Request, res: Response) {
   try {
     const rows = await PushLogModel.find({})
+      .select("-raw")
       .sort({ createdAt: -1 })
-      .limit(1000);
+      .limit(1000)
+      .lean();
 
     res.json({
       success: true,

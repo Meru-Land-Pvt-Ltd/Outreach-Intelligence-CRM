@@ -213,7 +213,11 @@ export async function getBrandMap(req: Request, res: Response) {
       filter.seedBrandId = seedBrandId;
     }
 
+    // Exclude heavy fields the Brand Map UI never renders: raw video blobs,
+    // full AI responses and per-video URL arrays dominate the payload
+    // (3+ MB → ~0.5 MB) and the transfer from remote Mongo.
     const query = BrandMap.find(filter)
+      .select("-raw -pgaRaw -pgaSignals -sourceVideoIds -sourceVideoUrls")
       .sort({
         mostRecentSponsorshipDate: -1,
         latestSponsorshipDate: -1,

@@ -1,4 +1,5 @@
 import express from "express";
+import compression from "compression";
 import sheetAlignedRoutes from "./routes/sheetAligned.routes";
 import cors from "cors";
 import { env } from "./config/env";
@@ -20,6 +21,10 @@ import { requireAuth } from "./controllers/auth.controller";
 import { instantlyWebhook } from "./controllers/instantly.controller";
 
 export const app = express();
+
+// Gzip every response — the list endpoints ship multi-MB JSON that
+// compresses ~10x, which dominates page load time over the internet.
+app.use(compression());
 
 app.use(
   cors({

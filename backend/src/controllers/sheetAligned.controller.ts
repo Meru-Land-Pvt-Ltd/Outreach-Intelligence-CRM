@@ -185,8 +185,10 @@ export async function getEnoylityInstantlyRows(req: Request, res: Response) {
     const rows = await InstantlyLeadModel.find({
       channel: "Enoylity Technology"
     })
+      .select("-raw -releaseHistory")
       .sort({ updatedAt: -1 })
-      .limit(3000);
+      .limit(3000)
+      .lean();
 
     ok(res, rows.map(normalizeInstantlyLeadForResponse));
   } catch (error: any) {
@@ -203,8 +205,10 @@ export async function getMhdInstantlyRows(req: Request, res: Response) {
     const rows = await InstantlyLeadModel.find({
       channel: "MHD Tech"
     })
+      .select("-raw -releaseHistory")
       .sort({ updatedAt: -1 })
-      .limit(3000);
+      .limit(3000)
+      .lean();
 
     ok(res, rows.map(normalizeInstantlyLeadForResponse));
   } catch (error: any) {
