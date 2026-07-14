@@ -643,6 +643,17 @@ export default function BrandMapPage() {
         },
       },
       {
+        id: "index",
+        header: "#",
+        align: "center",
+        widthClassName: "min-w-[60px]",
+        render: (_brand, index) => (
+          <span className="text-sm font-semibold text-slate-500">
+            {index + 1}
+          </span>
+        ),
+      },
+      {
         id: "brandName",
         header: "Brand",
         widthClassName: "min-w-[230px]",

@@ -640,6 +640,17 @@ export function RawContactsTable({
   const columns = useMemo<AdminTableColumn<RawContact>[]>(() => {
     const baseColumns: AdminTableColumn<RawContact>[] = [
       {
+        id: "index",
+        header: "#",
+        align: "center",
+        widthClassName: "min-w-[60px]",
+        render: (_row, index) => (
+          <span className="text-sm font-semibold text-slate-500">
+            {index + 1}
+          </span>
+        ),
+      },
+      {
         id: "brandName",
         header: "Brand Name",
         widthClassName: "min-w-[220px]",

@@ -1076,8 +1076,22 @@ export default function ControlPanelPage() {
       {
         id: "status",
         header: "Status",
-        widthClassName: "min-w-[130px]",
-        render: (row) => <StatusBadge status={getEffectiveCrawlStatus(row)} />,
+        widthClassName: "min-w-[150px]",
+        render: (row) => {
+          const status = getEffectiveCrawlStatus(row);
+          const position = Number((row as any).queuePosition || 0);
+
+          return (
+            <div className="flex flex-col items-start gap-1">
+              <StatusBadge status={status} />
+              {status === "queued" && position > 0 ? (
+                <span className="text-xs font-medium text-slate-500">
+                  #{position} in line
+                </span>
+              ) : null}
+            </div>
+          );
+        },
       },
       {
         id: "startedAt",

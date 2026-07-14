@@ -823,6 +823,7 @@ function ImportedLeadsTable({
           <thead>
             <tr className="text-left text-xs font-semibold text-slate-500">
               {[
+                "#",
                 "First Name",
                 "Email",
                 "Company",
@@ -847,7 +848,7 @@ function ImportedLeadsTable({
             {loading ? (
               <tr>
                 <td
-                  colSpan={9}
+                  colSpan={10}
                   className="px-4 py-10 text-center text-sm font-semibold text-slate-500"
                 >
                   Loading imported leads...
@@ -856,7 +857,7 @@ function ImportedLeadsTable({
             ) : leads.length === 0 ? (
               <tr>
                 <td
-                  colSpan={9}
+                  colSpan={10}
                   className="px-4 py-10 text-center text-sm font-semibold text-slate-500"
                 >
                   No imported leads found. Click Export Leads first.
@@ -877,6 +878,10 @@ function ImportedLeadsTable({
                         : "hover:bg-slate-50/70"
                     }
                   >
+                    <td className="border-b border-slate-100 px-4 py-4 text-center text-sm font-semibold text-slate-500">
+                      {index + 1}
+                    </td>
+
                     <td className="border-b border-slate-100 px-4 py-4 text-sm font-semibold text-slate-800">
                       {lead.firstName || "-"}
                     </td>

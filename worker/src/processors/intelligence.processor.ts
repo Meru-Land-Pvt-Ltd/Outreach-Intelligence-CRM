@@ -241,6 +241,17 @@ export async function intelligenceProcessor(job: Job, token?: string) {
       20
     );
 
+    // A crawl that saved nothing must fail loudly, not "complete" with empty
+    // results (which looks like the pipeline silently stopped).
+    if (Number(crawlResult.saved || 0) === 0) {
+      throw new Error(
+        'No YouTube videos found for "' +
+          seedBrandName +
+          (seedProductName ? " " + seedProductName : "") +
+          '". Check the brand/product spelling, or the YouTube API quota may be exhausted — try again later or adjust the seed.'
+      );
+    }
+
     await updateProgress(job, jobId, "PROCESS_RAW_VIDEOS_STARTED", 30);
 
     const aiResult = await runStage(jobId, "AI_ANALYSIS", stageState, () =>

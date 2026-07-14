@@ -491,6 +491,17 @@ export function ChannelLeadsPage({
         },
       },
       {
+        id: "index",
+        header: "#",
+        align: "center",
+        widthClassName: "min-w-[60px]",
+        render: (_row, index) => (
+          <span className="text-sm font-semibold text-slate-500">
+            {index + 1}
+          </span>
+        ),
+      },
+      {
         id: "firstName",
         header: "First Name",
         widthClassName: "min-w-[140px]",

@@ -194,6 +194,29 @@ function numberEnv(name: string, fallback: number) {
   return Number.isFinite(value) && value > 0 ? Math.floor(value) : fallback;
 }
 
+// Errors where retrying is pointless: quota exhausted, bad/expired API key.
+// Continuing would stamp every remaining video with useless heuristic fields
+// (the heuristic returns the seed brand's own name, which the brand-map build
+// then excludes) — better to abort and leave videos pending for a re-run.
+export class AiUnavailableError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "AiUnavailableError";
+  }
+}
+
+function isPermanentAiError(message: string) {
+  const lower = String(message || "").toLowerCase();
+
+  return (
+    lower.includes("exceeded your current quota") ||
+    lower.includes("insufficient_quota") ||
+    lower.includes("invalid api key") ||
+    lower.includes("incorrect api key") ||
+    lower.includes("401")
+  );
+}
+
 export async function analyzeUnprocessedRawVideos(
   seedBrandId: string,
   checkControl?: () => Promise<void>
@@ -208,17 +231,32 @@ export async function analyzeUnprocessedRawVideos(
 
   let totalProcessed = 0;
   let totalBatches = 0;
-  let fallbackOnlyReason = "";
+  let aiBatches = 0;
+  let fallbackBatches = 0;
+  let consecutiveFailures = 0;
+  let lastFailureReason = "";
   const rawResponses: string[] = [];
+
+  // Each video is attempted at most once per run — without this, a batch that
+  // fell back (status fallback_completed, which is retryable across runs)
+  // would be re-selected by the very next query and loop forever.
+  const attemptedIds: any[] = [];
 
   while (totalProcessed < maxTotalToAnalyze) {
     await checkControl?.();
     const remaining = maxTotalToAnalyze - totalProcessed;
     const videos = await RawYoutubeVideo.find({
       seedBrandId,
+      _id: { $nin: attemptedIds },
       $or: [
         { aiProcessed: { $ne: true } },
-        { analysisStatus: { $in: ["", "pending", "pending_retry", "failed"] } },
+        {
+          analysisStatus: {
+            // fallback_completed is retried so a re-run after an outage
+            // (e.g. OpenAI quota refill) heals heuristic-stamped videos.
+            $in: ["", "pending", "pending_retry", "failed", "fallback_completed"]
+          }
+        },
         { analysisStatus: { $exists: false } },
         ...blankRawVideoAiFieldFilter().$or
       ]
@@ -230,6 +268,10 @@ export async function analyzeUnprocessedRawVideos(
       break;
     }
 
+    for (const video of videos) {
+      attemptedIds.push(video._id);
+    }
+
     totalBatches += 1;
 
     console.log("Raw video analysis batch started:", {
@@ -239,27 +281,17 @@ export async function analyzeUnprocessedRawVideos(
       maxTotalToAnalyze
     });
 
-    if (fallbackOnlyReason) {
-      await checkControl?.();
-      totalProcessed += await applyFallbackBatch(videos, fallbackOnlyReason);
-      console.log("Raw video analysis failed; fallback batch completed:", {
-        batch: totalBatches,
-        totalProcessed,
-        reason: fallbackOnlyReason
-      });
-      console.log("Raw video fallback batch completed:", {
-        batch: totalBatches,
-        totalProcessed,
-        reason: fallbackOnlyReason
-      });
-      continue;
-    }
-
     try {
       await checkControl?.();
       const result = await analyzeBatch(videos);
 
+      if (result.parsedRows === 0) {
+        throw new Error("OpenAI response parsed zero rows");
+      }
+
       totalProcessed += result.processed;
+      aiBatches += 1;
+      consecutiveFailures = 0;
       rawResponses.push(result.rawResponse);
 
       console.log("Raw video analysis batch completed:", {
@@ -268,20 +300,44 @@ export async function analyzeUnprocessedRawVideos(
         parsedRows: result.parsedRows,
         totalProcessed
       });
-
-      if (result.parsedRows === 0) {
-        fallbackOnlyReason = "OpenAI response parsed zero rows; fallback fields applied";
-      }
     } catch (error: any) {
-      fallbackOnlyReason =
-        (error.message || "Raw video analysis failed") + "; fallback fields applied";
+      const reason = error?.message || "Raw video analysis failed";
+
+      // Quota/auth failures never recover mid-run: abort, keep videos pending.
+      if (isPermanentAiError(reason)) {
+        throw new AiUnavailableError(
+          "OpenAI is unavailable (" +
+            reason +
+            "). Videos were left unanalyzed — fix the OpenAI quota/key and run the crawl again."
+        );
+      }
+
+      // Transient failure: fall back for THIS batch only and keep trying AI
+      // on the next batch, with a circuit breaker for repeated failures.
+      consecutiveFailures += 1;
+      lastFailureReason = reason;
+
+      if (consecutiveFailures >= 3) {
+        throw new AiUnavailableError(
+          "OpenAI failed " +
+            consecutiveFailures +
+            " batches in a row (" +
+            reason +
+            "). Remaining videos were left unanalyzed — run the crawl again once the AI is healthy."
+        );
+      }
 
       await checkControl?.();
-      totalProcessed += await applyFallbackBatch(videos, fallbackOnlyReason);
-      console.log("Raw video analysis failed; fallback batch completed:", {
+      totalProcessed += await applyFallbackBatch(
+        videos,
+        reason + "; fallback fields applied"
+      );
+      fallbackBatches += 1;
+
+      console.log("Raw video analysis batch failed; fallback applied:", {
         batch: totalBatches,
-        totalProcessed,
-        reason: fallbackOnlyReason
+        consecutiveFailures,
+        reason
       });
     }
   }
@@ -289,8 +345,10 @@ export async function analyzeUnprocessedRawVideos(
   return {
     processed: totalProcessed,
     totalBatches,
-    fallbackOnly: Boolean(fallbackOnlyReason),
-    fallbackReason: fallbackOnlyReason,
+    aiBatches,
+    fallbackBatches,
+    fallbackOnly: totalBatches > 0 && aiBatches === 0,
+    fallbackReason: lastFailureReason,
     rawResponse: rawResponses.join("\n\n---BATCH---\n\n")
   };
 }

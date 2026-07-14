@@ -796,6 +796,15 @@ export async function getActiveIntelligenceJobs(req: Request, res: Response) {
       100
     );
 
+    // FIFO position of each waiting job, so the UI can show "#N in line"
+    // instead of an unexplained perpetual "queued".
+    const waitingJobs = await intelligenceQueue.getJobs(["waiting"], 0, 100);
+    const queuePositionByJobId = new Map<string, number>();
+
+    waitingJobs.forEach((job, index) => {
+      queuePositionByJobId.set(String(job.id), index + 1);
+    });
+
     const jobIds = jobs.map((job) => String(job.id));
 
     const logs = await JobLog.find({
@@ -866,7 +875,8 @@ export async function getActiveIntelligenceJobs(req: Request, res: Response) {
           return {
             ...normalizeJobLog(log, seedBrand),
             status,
-            jobId: String(job.id)
+            jobId: String(job.id),
+            queuePosition: queuePositionByJobId.get(String(job.id)) || 0
           };
         }
 
