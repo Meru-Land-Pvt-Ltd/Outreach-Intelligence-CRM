@@ -10,6 +10,7 @@ import {
   ChevronDown,
   ChevronsLeft,
   ChevronsRight,
+  CreditCard,
   FileText,
   Home,
   LogOut,
@@ -136,6 +137,12 @@ const navItems: NavItem[] = [
     href: "/excluded-brands",
     activePath: "/excluded-brands",
     icon: ShieldX,
+  },
+  {
+    title: "API Billing",
+    href: "/api-billing",
+    activePath: "/api-billing",
+    icon: CreditCard,
   },
   {
     title: "Run Log",

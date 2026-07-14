@@ -1,6 +1,7 @@
 import { NextResponse, type NextRequest } from "next/server";
 
 const protectedPaths = [
+  "/api-billing",
   "/brand-map",
   "/contacts",
   "/control-panel",

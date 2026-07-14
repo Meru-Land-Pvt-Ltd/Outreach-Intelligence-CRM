@@ -15,6 +15,7 @@ import sheetsJobsRoutes from "./routes/sheetsJobs.routes";
 import instantlyRoutes from "./routes/instantly.routes";
 import reviewsRoutes from "./routes/reviews.routes";
 import settingsRoutes from "./routes/settings.routes";
+import billingRoutes from "./routes/billing.routes";
 import { requireAuth } from "./controllers/auth.controller";
 import { instantlyWebhook } from "./controllers/instantly.controller";
 
@@ -49,5 +50,6 @@ app.use("/api/sheets", sheetsRoutes);
 app.use("/api/instantly", instantlyRoutes);
 app.use("/api/reviews", reviewsRoutes);
 app.use("/api/settings", settingsRoutes);
+app.use("/api/billing", billingRoutes);
 
 app.use("/api", sheetAlignedRoutes);
