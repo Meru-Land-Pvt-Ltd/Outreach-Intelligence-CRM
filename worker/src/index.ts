@@ -25,7 +25,9 @@ async function startWorker() {
     throw new Error("MONGODB_URI missing in worker env");
   }
 
-  await mongoose.connect(mongoUri);
+  // Mongo is remote: compress driver traffic (zlib ships with Node; the
+  // server negotiates and silently skips it if unsupported).
+  await mongoose.connect(mongoUri, { compressors: ["zlib"] });
 
   console.log("Worker MongoDB connected");
   console.log("Worker queue:", queueName);
