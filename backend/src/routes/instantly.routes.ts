@@ -18,6 +18,7 @@ import {
   pushSelectedCampaign,
   pushToInstantly,
   releasePushedLeads,
+  unpushLeads,
   saveTemplate,
   verifyPendingInstantlyLeads
 } from "../controllers/instantly.controller";
@@ -61,6 +62,7 @@ router.post("/pull-bounced", pullBouncedFromInstantly);
 router.post("/bounces/pull", pullBouncedFromInstantly);
 
 router.post("/release-pushed", releasePushedLeads);
+router.post("/unpush", unpushLeads);
 
 // The webhook is registered directly in app.ts, before the auth gate.
 

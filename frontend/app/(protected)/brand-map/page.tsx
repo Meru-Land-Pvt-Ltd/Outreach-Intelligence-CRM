@@ -263,6 +263,24 @@ export default function BrandMapPage() {
 
   const [page, setPage] = useState(1);
 
+  const [sortBy, setSortBy] = useState("");
+  const [sortOrder, setSortOrder] = useState<"asc" | "desc">("desc");
+
+  const NUMERIC_SORT_FIELDS = useMemo(
+    () => new Set(["pgaScore", "channelCount", "mostRecentSponsorshipDate"]),
+    []
+  );
+
+  function handleSort(field: string) {
+    if (sortBy === field) {
+      setSortOrder((prev) => (prev === "desc" ? "asc" : "desc"));
+    } else {
+      setSortBy(field);
+      // Numeric columns start highest-first (e.g. PGA 90, 89, 88…).
+      setSortOrder(NUMERIC_SORT_FIELDS.has(field) ? "desc" : "asc");
+    }
+  }
+
   async function loadBrands() {
     setLoading(true);
 
@@ -321,9 +339,44 @@ export default function BrandMapPage() {
     });
   }, [brands, search, foundVia, niche, selection]);
 
+  const sortedBrands = useMemo(() => {
+    if (!sortBy) return filteredBrands;
+
+    const numeric = NUMERIC_SORT_FIELDS.has(sortBy);
+    const direction = sortOrder === "asc" ? 1 : -1;
+
+    return [...filteredBrands].sort((a: any, b: any) => {
+      let aValue = a[sortBy];
+      let bValue = b[sortBy];
+
+      if (sortBy === "mostRecentSponsorshipDate") {
+        aValue = aValue ? new Date(aValue).getTime() : null;
+        bValue = bValue ? new Date(bValue).getTime() : null;
+      }
+
+      const aMissing = aValue === undefined || aValue === null || aValue === "";
+      const bMissing = bValue === undefined || bValue === null || bValue === "";
+
+      // Rows without a value always sink to the bottom, either direction.
+      if (aMissing && bMissing) return 0;
+      if (aMissing) return 1;
+      if (bMissing) return -1;
+
+      if (numeric) {
+        return (Number(aValue) - Number(bValue)) * direction;
+      }
+
+      return (
+        String(aValue).localeCompare(String(bValue), undefined, {
+          sensitivity: "base",
+        }) * direction
+      );
+    });
+  }, [filteredBrands, sortBy, sortOrder, NUMERIC_SORT_FIELDS]);
+
   const visibleBrands = useMemo(() => {
-    return filteredBrands.slice(0, page * PAGE_SIZE);
-  }, [filteredBrands, page]);
+    return sortedBrands.slice(0, page * PAGE_SIZE);
+  }, [sortedBrands, page]);
 
   const totalPages = Math.max(1, Math.ceil(filteredBrands.length / PAGE_SIZE));
 
@@ -656,6 +709,7 @@ export default function BrandMapPage() {
       {
         id: "brandName",
         header: "Brand",
+        sortable: true,
         widthClassName: "min-w-[230px]",
         render: (brand) => {
           const domain = clean(brand.domain);
@@ -708,6 +762,7 @@ export default function BrandMapPage() {
         id: "channelCount",
         header: "Channels",
         align: "center",
+        sortable: true,
         widthClassName: "min-w-[100px]",
         render: (brand) => {
           const names = Array.isArray(brand.channelNames)
@@ -724,6 +779,7 @@ export default function BrandMapPage() {
       {
         id: "mostRecentSponsorshipDate",
         header: "Last Sponsorship",
+        sortable: true,
         widthClassName: "min-w-[150px]",
         render: (brand) => formatDate(brand.mostRecentSponsorshipDate),
       },
@@ -737,6 +793,8 @@ export default function BrandMapPage() {
         id: "pga",
         header: "PGA",
         align: "center",
+        sortable: true,
+        sortField: "pgaScore",
         widthClassName: "min-w-[120px]",
         render: (brand) => <PgaBadge row={brand} />,
       },
@@ -932,6 +990,9 @@ export default function BrandMapPage() {
         data={visibleBrands}
         columns={columns}
         rowKey={(brand, index) => brand._id || `${brand.brandName}-${index}`}
+        sortBy={sortBy}
+        sortOrder={sortOrder}
+        onSort={handleSort}
         loading={loading}
         loadingRows={8}
         emptyDescription={

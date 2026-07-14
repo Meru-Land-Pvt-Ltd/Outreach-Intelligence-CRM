@@ -48,6 +48,7 @@ export default function PushLogsPage() {
         <Table>
           <TableHeader>
             <TableRow>
+              <TableHead className="w-[60px] text-center">#</TableHead>
               <TableHead>Channel</TableHead>
               <TableHead>Campaign</TableHead>
               <TableHead>Total Pushed</TableHead>
@@ -58,8 +59,11 @@ export default function PushLogsPage() {
           </TableHeader>
 
           <TableBody>
-            {rows.map((row: any) => (
+            {rows.map((row: any, index: number) => (
               <TableRow key={row._id}>
+                <TableCell className="text-center font-semibold text-slate-500">
+                  {index + 1}
+                </TableCell>
                 <TableCell>{row.channel || "-"}</TableCell>
                 <TableCell>{row.campaignName || "-"}</TableCell>
                 <TableCell>{row.totalPushed || 0}</TableCell>
@@ -75,7 +79,7 @@ export default function PushLogsPage() {
 
             {rows.length === 0 ? (
               <TableRow>
-                <TableCell colSpan={6} className="py-10 text-center text-slate-500">
+                <TableCell colSpan={7} className="py-10 text-center text-slate-500">
                   {loading ? "Loading push logs…" : "No push logs yet."}
                 </TableCell>
               </TableRow>

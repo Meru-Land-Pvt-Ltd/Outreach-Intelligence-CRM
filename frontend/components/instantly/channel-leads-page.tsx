@@ -2,14 +2,15 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
-import { ExternalLink, Send } from "lucide-react";
-import { apiGet } from "@/lib/api";
+import { ExternalLink, RotateCcw, Send } from "lucide-react";
+import { apiGet, apiPost } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import AdminTable, {
   type AdminTableColumn,
 } from "@/components/ui/tableComp";
 import { FilterSearchInput } from "@/components/shared/filter-search-input";
 import { FilterSelect } from "@/components/shared/filter-select";
+import { Notice } from "@/components/shared/notice";
 import { CreateCampaignDialog } from "@/components/instantly/create-campaign-dialog";
 
 type Channel = "Enoylity Technology" | "MHD Tech";
@@ -295,8 +296,28 @@ export function ChannelLeadsPage({
 
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [dialogOpen, setDialogOpen] = useState(false);
+  const [unpushing, setUnpushing] = useState(false);
+  const [notice, setNotice] = useState<{
+    type: "success" | "error";
+    text: string;
+  } | null>(null);
+
+  const [sortBy, setSortBy] = useState("");
+  const [sortOrder, setSortOrder] = useState<"asc" | "desc">("desc");
 
   const [page, setPage] = useState(1);
+
+  const NUMERIC_SORT_FIELDS = useMemo(() => new Set(["pgaScore"]), []);
+
+  function handleSort(field: string) {
+    if (sortBy === field) {
+      setSortOrder((prev) => (prev === "desc" ? "asc" : "desc"));
+    } else {
+      setSortBy(field);
+      // Numeric columns start highest-first (e.g. PGA 90, 89, 88…).
+      setSortOrder(NUMERIC_SORT_FIELDS.has(field) ? "desc" : "asc");
+    }
+  }
 
   async function loadRows() {
     setLoading(true);
@@ -404,20 +425,52 @@ export function ChannelLeadsPage({
     campaignFilter,
   ]);
 
+  const sortedRows = useMemo(() => {
+    if (!sortBy) return filteredRows;
+
+    const numeric = NUMERIC_SORT_FIELDS.has(sortBy);
+    const direction = sortOrder === "asc" ? 1 : -1;
+
+    return [...filteredRows].sort((a: any, b: any) => {
+      const aValue = (a as any)[sortBy];
+      const bValue = (b as any)[sortBy];
+
+      const aMissing =
+        aValue === undefined || aValue === null || aValue === "";
+      const bMissing =
+        bValue === undefined || bValue === null || bValue === "";
+
+      // Rows without a value always sink to the bottom, either direction.
+      if (aMissing && bMissing) return 0;
+      if (aMissing) return 1;
+      if (bMissing) return -1;
+
+      if (numeric) {
+        return (Number(aValue) - Number(bValue)) * direction;
+      }
+
+      return (
+        String(aValue).localeCompare(String(bValue), undefined, {
+          sensitivity: "base",
+        }) * direction
+      );
+    });
+  }, [filteredRows, sortBy, sortOrder, NUMERIC_SORT_FIELDS]);
+
   const visibleRows = useMemo(
-    () => filteredRows.slice(0, page * PAGE_SIZE),
-    [filteredRows, page]
+    () => sortedRows.slice(0, page * PAGE_SIZE),
+    [sortedRows, page]
   );
 
   const totalPages = Math.max(1, Math.ceil(filteredRows.length / PAGE_SIZE));
 
-  // Only unpushed, non-bounced leads are eligible for a new campaign.
+  // Non-bounced leads are selectable: unpushed ones for a new campaign,
+  // pushed ones so they can be unpushed and re-pitched.
   const selectableIds = useMemo(
     () =>
       filteredRows
         .filter(
           (row) =>
-            !clean(row.pushedStatus) &&
             clean(getInstantlyBouncedStatus(row)).toLowerCase() !== "bounced"
         )
         .map((row) => clean(row._id))
@@ -476,7 +529,6 @@ export function ChannelLeadsPage({
         render: (row) => {
           const id = clean(row._id);
           const eligible =
-            !clean(row.pushedStatus) &&
             clean(getInstantlyBouncedStatus(row)).toLowerCase() !== "bounced";
 
           return (
@@ -486,6 +538,7 @@ export function ChannelLeadsPage({
               checked={selectedIds.has(id)}
               onChange={() => toggleRow(id)}
               className="h-4 w-4 rounded border-slate-300 disabled:opacity-30"
+              title={eligible ? undefined : "Bounced leads stay locked"}
             />
           );
         },
@@ -520,6 +573,7 @@ export function ChannelLeadsPage({
       {
         id: "companyName",
         header: "Company",
+        sortable: true,
         widthClassName: "min-w-[170px]",
         render: (row) => (
           <span className="font-semibold text-slate-950">
@@ -537,6 +591,7 @@ export function ChannelLeadsPage({
         id: "pgaScore",
         header: "PGA",
         align: "center",
+        sortable: true,
         widthClassName: "min-w-[90px]",
         render: (row) =>
           typeof row.pgaScore === "number" ? (
@@ -600,6 +655,58 @@ export function ChannelLeadsPage({
     () => rows.filter((row) => selectedIds.has(clean(row._id))),
     [rows, selectedIds]
   );
+
+  const selectedUnpushed = useMemo(
+    () => selectedLeads.filter((row) => !clean(row.pushedStatus)),
+    [selectedLeads]
+  );
+
+  const selectedPushed = useMemo(
+    () => selectedLeads.filter((row) => Boolean(clean(row.pushedStatus))),
+    [selectedLeads]
+  );
+
+  async function unpushSelected() {
+    const leadIds = selectedPushed.map((row) => clean(row._id)).filter(Boolean);
+
+    if (leadIds.length === 0) return;
+
+    if (
+      !window.confirm(
+        `Unpush ${leadIds.length} lead(s)? Their pushed status clears so they can join a new campaign. The old Instantly campaign is not modified.`
+      )
+    ) {
+      return;
+    }
+
+    setUnpushing(true);
+    setNotice(null);
+
+    const response: any = await apiPost("/instantly/unpush", {
+      channel,
+      leadIds,
+    });
+
+    if (response?.success) {
+      setNotice({
+        type: "success",
+        text:
+          `${response.unpushed} lead(s) unpushed and ready to re-pitch.` +
+          (response.skippedBounced
+            ? ` ${response.skippedBounced} bounced lead(s) stayed locked.`
+            : ""),
+      });
+      setSelectedIds(new Set());
+      await loadRows();
+    } else {
+      setNotice({
+        type: "error",
+        text: response?.message || "Unpush failed.",
+      });
+    }
+
+    setUnpushing(false);
+  }
 
   return (
     <main className="w-full space-y-6">
@@ -671,24 +778,44 @@ export function ChannelLeadsPage({
         </div>
       </section>
 
+      {notice ? <Notice type={notice.type} text={notice.text} /> : null}
+
       {selectedIds.size > 0 ? (
         <div className="sticky top-2 z-10 flex flex-wrap items-center gap-3 rounded-2xl border border-blue-200 bg-blue-50/95 px-4 py-3 shadow-sm backdrop-blur">
           <span className="text-sm font-semibold text-blue-900">
-            {selectedIds.size} lead(s) selected
+            {selectedIds.size} selected · {selectedUnpushed.length} unpushed ·{" "}
+            {selectedPushed.length} pushed
           </span>
+
           <Button
             type="button"
             size="sm"
+            disabled={selectedUnpushed.length === 0 || unpushing}
             onClick={() => setDialogOpen(true)}
             className="h-9 rounded-md bg-blue-600 text-white hover:bg-blue-700"
           >
             <Send className="mr-1.5 h-3.5 w-3.5" />
-            Create Campaign
+            Create Campaign ({selectedUnpushed.length})
           </Button>
+
+          <Button
+            type="button"
+            size="sm"
+            variant="outline"
+            disabled={selectedPushed.length === 0 || unpushing}
+            onClick={unpushSelected}
+            title="Clear the pushed status of selected leads so they can be pitched again"
+            className="h-9 rounded-md !border-amber-300 !text-amber-700 hover:!bg-amber-50"
+          >
+            <RotateCcw className="mr-1.5 h-3.5 w-3.5" />
+            {unpushing ? "Unpushing…" : `Unpush (${selectedPushed.length})`}
+          </Button>
+
           <Button
             type="button"
             size="sm"
             variant="ghost"
+            disabled={unpushing}
             onClick={() => setSelectedIds(new Set())}
             className="h-9 rounded-md text-slate-600"
           >
@@ -701,6 +828,9 @@ export function ChannelLeadsPage({
         data={visibleRows}
         columns={columns}
         rowKey={(row, index) => row._id || `${row.email}-${index}`}
+        sortBy={sortBy}
+        sortOrder={sortOrder}
+        onSort={handleSort}
         loading={loading}
         loadingRows={8}
         emptyTitle={loading ? `Loading ${heading}...` : `No ${heading} rows yet.`}
@@ -725,7 +855,7 @@ export function ChannelLeadsPage({
       <CreateCampaignDialog
         open={dialogOpen}
         channel={channel}
-        leads={selectedLeads.map((row) => ({
+        leads={selectedUnpushed.map((row) => ({
           _id: clean(row._id),
           firstName: clean(row.firstName),
           email: clean(row.email),

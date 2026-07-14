@@ -3736,6 +3736,134 @@ export async function instantlyWebhook(req: Request, res: Response) {
   }
 }
 
+// Manual unpush: clear the pushed marker on explicitly selected leads so they
+// can enter a new campaign immediately (no cooling-off wait — this is a
+// deliberate per-lead action, unlike the bulk time-based release below).
+// Bounced leads stay locked; the old Instantly campaign is not modified.
+export async function unpushLeads(req: Request, res: Response) {
+  try {
+    const channel = cleanText(req.body?.channel);
+    const leadIds: string[] = (
+      Array.isArray(req.body?.leadIds) ? req.body.leadIds : []
+    )
+      .map((id: any) => String(id))
+      .filter((id: string) => mongoose.Types.ObjectId.isValid(id));
+
+    if (!channel || leadIds.length === 0) {
+      return res.status(400).json({
+        success: false,
+        message: "channel and leadIds are required"
+      });
+    }
+
+    if (leadIds.length > 500) {
+      return res.status(400).json({
+        success: false,
+        message: "Too many leads in one request (max 500)."
+      });
+    }
+
+    const rows = await InstantlyLeadModel.find({
+      _id: { $in: leadIds.map((id) => new mongoose.Types.ObjectId(id)) },
+      channel,
+      pushedStatus: { $nin: ["", null] }
+    })
+      .select("email companyName pushedStatus pushedAt campaignId campaignName instantlyBounced")
+      .lean();
+
+    const unpushable = (rows as any[]).filter(
+      (row) => ["", null].includes(row.instantlyBounced) ||
+        cleanText(row.instantlyBounced).toLowerCase() === "not bounced"
+    );
+    const skippedBounced = rows.length - unpushable.length;
+
+    if (unpushable.length === 0) {
+      return res.status(400).json({
+        success: false,
+        message:
+          rows.length === 0
+            ? "None of the selected leads are pushed."
+            : "All selected pushed leads are bounced — bounced leads stay locked.",
+        skippedBounced
+      });
+    }
+
+    const releasedAt = new Date();
+    const releasedBy = String((req as any).user?.email || "");
+
+    await InstantlyLeadModel.bulkWrite(
+      unpushable.map((row) => ({
+        updateOne: {
+          filter: { _id: row._id },
+          update: {
+            $push: {
+              releaseHistory: {
+                releasedAt,
+                releasedBy,
+                reason: "manual-unpush",
+                previousPushedStatus: row.pushedStatus || "",
+                previousCampaignId: row.campaignId || "",
+                previousCampaignName: row.campaignName || "",
+                previousPushedAt: row.pushedAt || null
+              }
+            },
+            $set: {
+              pushedStatus: "",
+              campaignId: "",
+              campaignName: ""
+            },
+            $unset: {
+              pushedAt: ""
+            }
+          }
+        }
+      }))
+    );
+
+    // Reset contacts only when no other channel still has the email pushed.
+    const emails = Array.from(
+      new Set(unpushable.map((row) => cleanEmail(row.email)).filter(Boolean))
+    );
+
+    const stillPushed = new Set(
+      (
+        await InstantlyLeadModel.distinct("email", {
+          email: { $in: emails },
+          pushedStatus: { $nin: ["", null] }
+        })
+      ).map((email: any) => cleanEmail(email))
+    );
+
+    const resettable = emails.filter((email) => !stillPushed.has(email));
+
+    let contactsReset = 0;
+
+    if (resettable.length > 0) {
+      const verifiedResult = await ContactModel.updateMany(
+        { email: { $in: resettable }, status: "pushed", verificationStatus: "Ok" },
+        { $set: { status: "verified" }, $unset: { pushedAt: "" } }
+      );
+      const restResult = await ContactModel.updateMany(
+        { email: { $in: resettable }, status: "pushed" },
+        { $set: { status: "email_found" }, $unset: { pushedAt: "" } }
+      );
+
+      contactsReset =
+        Number(verifiedResult?.modifiedCount || 0) +
+        Number(restResult?.modifiedCount || 0);
+    }
+
+    res.json({
+      success: true,
+      unpushed: unpushable.length,
+      skippedBounced,
+      contactsReset
+    });
+  } catch (error: any) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+}
+
 // Cooling-off: release leads pushed long enough ago so their brands can be
 // re-pitched. Defaults to a dry run; the cutoff can never be younger than
 // the coolingOffMonths setting. Bounced leads stay locked forever.
