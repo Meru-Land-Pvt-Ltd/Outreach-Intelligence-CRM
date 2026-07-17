@@ -156,12 +156,126 @@ export async function createClosedDeal(req: Request, res: Response) {
 
 export async function getExcludedBrands(req: Request, res: Response) {
   try {
-    const data = await ExcludedBrand.find({}).sort({ brandName: 1 }).limit(1000);
+    const rows = await ExcludedBrand.find({})
+      .sort({ brandName: 1 })
+      .limit(1000)
+      .lean();
+
+    // Enrich with the PGA score from matching Brand Map rows so the list
+    // shows which exclusions are worth restoring. Brands that never got a
+    // Brand Map row (e.g. xlsx imports) simply have no score.
+    const brandMaps = await (BrandMap as any)
+      .find({}, { brandName: 1, domain: 1, pgaScore: 1, niche: 1 })
+      .lean();
+
+    const byName = new Map<string, any>();
+    const byDomain = new Map<string, any>();
+
+    const keepBest = (map: Map<string, any>, key: string, row: any) => {
+      if (!key) return;
+      const existing = map.get(key);
+      const better =
+        !existing ||
+        (typeof row.pgaScore === "number" &&
+          (typeof existing.pgaScore !== "number" ||
+            row.pgaScore > existing.pgaScore));
+      if (better) map.set(key, row);
+    };
+
+    for (const row of brandMaps as any[]) {
+      keepBest(byName, normalizeBrandName(row.brandName), row);
+      keepBest(byDomain, normalizeDomain(row.domain), row);
+    }
+
+    const data = (rows as any[]).map((row) => {
+      const match =
+        byDomain.get(normalizeDomain(row.normalizedDomain || row.domain)) ||
+        byName.get(normalizeBrandName(row.normalizedBrandName || row.brandName));
+
+      return {
+        ...row,
+        pgaScore:
+          match && typeof match.pgaScore === "number" ? match.pgaScore : null,
+        niche: match?.niche || ""
+      };
+    });
 
     res.json({
       success: true,
       count: data.length,
       data
+    });
+  } catch (error: any) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+}
+
+// Restore: remove the brand from the exclude list AND flip its Brand Map
+// rows back to pending, so future crawls and the current pipeline include it.
+export async function restoreExcludedBrand(req: Request, res: Response) {
+  try {
+    const { id } = req.params;
+
+    const row: any = await ExcludedBrand.findById(id).lean();
+
+    if (!row) {
+      return res.status(404).json({
+        success: false,
+        message: "Excluded brand not found"
+      });
+    }
+
+    const brandName = cleanText(row.brandName);
+    const domain = normalizeDomain(row.normalizedDomain || row.domain);
+
+    const conditions: any[] = [];
+
+    if (brandName) {
+      conditions.push({
+        brandName: new RegExp("^" + escapeRegex(brandName) + "$", "i")
+      });
+    }
+
+    if (domain) {
+      conditions.push({
+        domain: new RegExp("^" + escapeRegex(domain) + "$", "i")
+      });
+      conditions.push({
+        domain: new RegExp("^www\\." + escapeRegex(domain) + "$", "i")
+      });
+    }
+
+    let restoredBrandMaps = 0;
+
+    if (conditions.length > 0) {
+      const result = await (BrandMap as any).updateMany(
+        { $or: conditions, selectionStatus: "excluded" },
+        {
+          $set: {
+            selectionStatus: "pending",
+            isExcluded: false,
+            selectionUpdatedAt: new Date(),
+            selectionUpdatedBy: String((req as any).user?.email || "restore")
+          }
+        }
+      );
+
+      restoredBrandMaps = Number(result?.modifiedCount || 0);
+
+      // Rows whose status string was stamped "excluded" get a usable value back.
+      await (BrandMap as any).updateMany(
+        { $or: conditions, status: "excluded" },
+        { $set: { status: "domain_found" } }
+      );
+    }
+
+    await ExcludedBrand.findByIdAndDelete(id);
+
+    res.json({
+      success: true,
+      message: "Brand restored",
+      restoredBrandMaps,
+      data: row
     });
   } catch (error: any) {
     res.status(500).json({ success: false, message: error.message });

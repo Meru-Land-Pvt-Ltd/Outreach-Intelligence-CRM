@@ -5,6 +5,7 @@ import {
   getExcludedBrands,
   createExcludedBrand,
   deleteExcludedBrand,
+  restoreExcludedBrand,
   getPipelineTracker,
   getNicheAnalysis
 } from "../controllers/sheets.controller";
@@ -16,6 +17,7 @@ router.post("/closed-deals", createClosedDeal);
 
 router.get("/excluded-brands", getExcludedBrands);
 router.post("/excluded-brands", createExcludedBrand);
+router.post("/excluded-brands/:id/restore", restoreExcludedBrand);
 router.delete("/excluded-brands/:id", deleteExcludedBrand);
 
 router.get("/pipeline-tracker", getPipelineTracker);
