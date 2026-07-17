@@ -388,7 +388,8 @@ export async function bulkSelectBrands(req: Request, res: Response) {
           _id: { $in: rows.map((row: any) => row._id) },
           selectionStatus: { $ne: "excluded" }
         },
-        [{ $set: { previousSelectionStatus: "$selectionStatus" } }]
+        [{ $set: { previousSelectionStatus: "$selectionStatus" } }],
+        { updatePipeline: true }
       );
 
       await BrandMap.updateMany(

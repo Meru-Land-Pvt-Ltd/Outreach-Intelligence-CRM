@@ -38,7 +38,8 @@ export async function markBrandMapExcluded(brandName: string, domain: string) {
   // restore can return each row to exactly where it was.
   await (BrandMap as any).updateMany(
     { $or: conditions, selectionStatus: { $ne: "excluded" } },
-    [{ $set: { previousSelectionStatus: "$selectionStatus" } }]
+    [{ $set: { previousSelectionStatus: "$selectionStatus" } }],
+    { updatePipeline: true }
   );
 
   const result = await (BrandMap as any).updateMany(
@@ -315,7 +316,8 @@ export async function restoreExcludedBrand(req: Request, res: Response) {
               previousSelectionStatus: "$$REMOVE"
             }
           }
-        ]
+        ],
+        { updatePipeline: true }
       );
 
       restoredBrandMaps = Number(result?.modifiedCount || 0);
