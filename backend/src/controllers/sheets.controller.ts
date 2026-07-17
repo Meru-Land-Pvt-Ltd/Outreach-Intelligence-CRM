@@ -34,6 +34,13 @@ export async function markBrandMapExcluded(brandName: string, domain: string) {
     return 0;
   }
 
+  // Snapshot the current status of not-yet-excluded rows first, so a later
+  // restore can return each row to exactly where it was.
+  await (BrandMap as any).updateMany(
+    { $or: conditions, selectionStatus: { $ne: "excluded" } },
+    [{ $set: { previousSelectionStatus: "$selectionStatus" } }]
+  );
+
   const result = await (BrandMap as any).updateMany(
     { $or: conditions },
     {
@@ -47,6 +54,39 @@ export async function markBrandMapExcluded(brandName: string, domain: string) {
   );
 
   return Number(result?.modifiedCount || 0);
+}
+
+// Every ExcludedBrand row that would block this brand (duplicates included:
+// e.g. one entry with a domain and one without). Matching mirrors the
+// worker's isExcludedBrand so restore lifts exactly what exclusion enforces.
+export function buildExclusionRowConditions(brandName: string, domain: string) {
+  const cleanName = cleanText(brandName);
+  const cleanDom = normalizeDomain(domain);
+  const normName = normalizeBrandName(cleanName);
+
+  const conditions: any[] = [];
+
+  if (normName) {
+    conditions.push({ normalizedBrandName: normName });
+  }
+
+  if (cleanDom) {
+    conditions.push({ normalizedDomain: cleanDom });
+  }
+
+  if (cleanName) {
+    conditions.push({
+      brandName: new RegExp("^" + escapeRegex(cleanName) + "$", "i")
+    });
+  }
+
+  if (cleanDom) {
+    conditions.push({
+      domain: new RegExp("^" + escapeRegex(cleanDom) + "$", "i")
+    });
+  }
+
+  return conditions;
 }
 
 export async function upsertExcludedBrand(input: {
@@ -210,8 +250,13 @@ export async function getExcludedBrands(req: Request, res: Response) {
   }
 }
 
-// Restore: remove the brand from the exclude list AND flip its Brand Map
-// rows back to pending, so future crawls and the current pipeline include it.
+// Restore: bring the brand fully back. Exclusion never deletes data — it only
+// sets blockers (exclude-list rows that make crawls skip the brand and pushes
+// reject its leads, plus "excluded" flags on Brand Map rows). Restore lifts
+// every blocker: ALL matching exclude-list entries are removed (duplicates
+// included) and each Brand Map row returns to the status it had before the
+// exclusion (approved stays approved), with its PGA score, emails and leads
+// untouched and immediately usable again.
 export async function restoreExcludedBrand(req: Request, res: Response) {
   try {
     const { id } = req.params;
@@ -250,14 +295,27 @@ export async function restoreExcludedBrand(req: Request, res: Response) {
     if (conditions.length > 0) {
       const result = await (BrandMap as any).updateMany(
         { $or: conditions, selectionStatus: "excluded" },
-        {
-          $set: {
-            selectionStatus: "pending",
-            isExcluded: false,
-            selectionUpdatedAt: new Date(),
-            selectionUpdatedBy: String((req as any).user?.email || "restore")
+        [
+          {
+            $set: {
+              selectionStatus: {
+                $cond: [
+                  {
+                    $in: ["$previousSelectionStatus", ["pending", "approved"]]
+                  },
+                  "$previousSelectionStatus",
+                  "pending"
+                ]
+              },
+              isExcluded: false,
+              selectionUpdatedAt: new Date(),
+              selectionUpdatedBy: String(
+                (req as any).user?.email || "restore"
+              ),
+              previousSelectionStatus: "$$REMOVE"
+            }
           }
-        }
+        ]
       );
 
       restoredBrandMaps = Number(result?.modifiedCount || 0);
@@ -269,12 +327,30 @@ export async function restoreExcludedBrand(req: Request, res: Response) {
       );
     }
 
+    // Remove every exclude-list entry that blocks this brand, not just the
+    // clicked one — a leftover duplicate would keep crawls skipping it.
+    let removedExclusions = 0;
+    const exclusionConditions = buildExclusionRowConditions(
+      row.brandName,
+      row.normalizedDomain || row.domain
+    );
+
+    if (exclusionConditions.length > 0) {
+      const removed = await (ExcludedBrand as any).deleteMany({
+        $or: exclusionConditions
+      });
+      removedExclusions = Number(removed?.deletedCount || 0);
+    }
+
+    // Safety net for legacy rows the matcher could not cover.
     await ExcludedBrand.findByIdAndDelete(id);
+    if (removedExclusions === 0) removedExclusions = 1;
 
     res.json({
       success: true,
       message: "Brand restored",
       restoredBrandMaps,
+      removedExclusions,
       data: row
     });
   } catch (error: any) {

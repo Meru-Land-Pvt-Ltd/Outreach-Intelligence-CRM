@@ -32,6 +32,9 @@ const BrandMapSchema = new mongoose.Schema(
     },
     selectionUpdatedAt: Date,
     selectionUpdatedBy: String,
+    // Status the row had just before it was excluded, so a restore can put
+    // the brand back exactly where it was (approved stays approved).
+    previousSelectionStatus: String,
 
     // PGA score (probability of acquisition): 4-criterion AI web-search
     // rating. pgaScore is the rounded mean of the sub-scores; brands under

@@ -437,6 +437,7 @@ export default function BrandMapPage() {
     setNotice(null);
 
     let updated = 0;
+    let removedExclusions = 0;
     let failed = "";
 
     for (const chunk of chunkArray(ids, BULK_CHUNK_SIZE)) {
@@ -447,6 +448,7 @@ export default function BrandMapPage() {
 
       if (response?.success) {
         updated += Number(response.updated || 0);
+        removedExclusions += Number(response.removedExclusions || 0);
       } else {
         failed = response?.message || "Bulk action failed.";
         break;
@@ -463,7 +465,10 @@ export default function BrandMapPage() {
             ? `${updated} brand(s) excluded and added to the Exclude list.`
             : action === "approve"
               ? `${updated} brand(s) approved.`
-              : `${updated} brand(s) reset to pending.`,
+              : `${updated} brand(s) reset to pending.` +
+                (removedExclusions > 0
+                  ? ` ${removedExclusions} entr${removedExclusions === 1 ? "y" : "ies"} removed from the Exclude list, so these brands are fully back in the pipeline.`
+                  : ""),
       });
       clearSelection();
       await loadBrands();

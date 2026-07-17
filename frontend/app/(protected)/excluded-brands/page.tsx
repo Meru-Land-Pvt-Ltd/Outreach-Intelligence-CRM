@@ -250,7 +250,7 @@ async function deleteRow(row: ExcludedBrandRow) {
     if (!id) return;
 
     const confirmed = window.confirm(
-      `Restore "${label}"? It is removed from the exclude list and its Brand Map rows return to pending, so future crawls and campaigns include it again.`
+      `Restore "${label}" completely? This removes it from the exclude list (duplicate entries too) and returns its Brand Map rows to the status they had before exclusion — its PGA score, emails and leads were never deleted, so everything becomes usable again and future crawls will include it.`
     );
 
     if (!confirmed) return;
@@ -264,14 +264,25 @@ async function deleteRow(row: ExcludedBrandRow) {
     );
 
     if (response.success) {
-      setNotice({
-        type: "success",
-        text:
-          `"${label}" restored.` +
-          (response.restoredBrandMaps
-            ? ` ${response.restoredBrandMaps} Brand Map row(s) set back to pending.`
-            : " No Brand Map rows needed changes."),
-      });
+      const parts = [`"${label}" fully restored.`];
+
+      parts.push(
+        response.restoredBrandMaps
+          ? `${response.restoredBrandMaps} Brand Map row(s) reactivated with all their data.`
+          : "No Brand Map rows needed changes."
+      );
+
+      if (Number(response.removedExclusions) > 1) {
+        setNotice({
+          type: "success",
+          text:
+            parts.join(" ") +
+            ` ${response.removedExclusions} exclude-list entries removed (duplicates included).`,
+        });
+      } else {
+        setNotice({ type: "success", text: parts.join(" ") });
+      }
+
       await loadRows();
     } else {
       setNotice({

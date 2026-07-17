@@ -4,7 +4,11 @@ import { BrandMap } from "../models/BrandMap.model";
 import { RawYoutubeVideo } from "../models/RawYoutubeVideo.model";
 import { JobLog } from "../models/JobLog.model";
 import { intelligenceQueue } from "../queues/intelligence.queue";
-import { upsertExcludedBrand } from "./sheets.controller";
+import {
+  buildExclusionRowConditions,
+  upsertExcludedBrand
+} from "./sheets.controller";
+import { ExcludedBrand } from "../models/ExcludedBrand.model";
 import { getAppSettings } from "./settings.controller";
 import { callOpenAIWithWebSearch } from "../utils/openaiResponses";
 import {
@@ -347,7 +351,8 @@ export async function bulkSelectBrands(req: Request, res: Response) {
             isExcluded: false,
             selectionUpdatedAt: now,
             selectionUpdatedBy: updatedBy
-          }
+          },
+          $unset: { previousSelectionStatus: "" }
         }
       );
 
@@ -376,6 +381,16 @@ export async function bulkSelectBrands(req: Request, res: Response) {
         }
       }
 
+      // Snapshot each row's current status first so a restore can bring it
+      // back exactly where it was (approved stays approved).
+      await BrandMap.updateMany(
+        {
+          _id: { $in: rows.map((row: any) => row._id) },
+          selectionStatus: { $ne: "excluded" }
+        },
+        [{ $set: { previousSelectionStatus: "$selectionStatus" } }]
+      );
+
       await BrandMap.updateMany(
         { _id: { $in: rows.map((row: any) => row._id) } },
         {
@@ -397,8 +412,10 @@ export async function bulkSelectBrands(req: Request, res: Response) {
       });
     }
 
-    // reset: back to pending for this map only. The global exclude list is
-    // managed on the Excluded Brands page and is deliberately not touched.
+    // reset: back to pending. Rows that were excluded also come off the
+    // global exclude list — otherwise future crawls would keep skipping the
+    // brand and pushes would keep rejecting its leads, which makes the reset
+    // look like it never happened.
     await BrandMap.updateMany(
       { _id: { $in: ids } },
       {
@@ -407,7 +424,8 @@ export async function bulkSelectBrands(req: Request, res: Response) {
           isExcluded: false,
           selectionUpdatedAt: now,
           selectionUpdatedBy: updatedBy
-        }
+        },
+        $unset: { previousSelectionStatus: "" }
       }
     );
 
@@ -420,10 +438,32 @@ export async function bulkSelectBrands(req: Request, res: Response) {
       }
     );
 
+    let removedExclusions = 0;
+    const wasExcluded = (rows as any[]).filter(
+      (row) => row.selectionStatus === "excluded" || row.isExcluded === true
+    );
+
+    if (wasExcluded.length > 0) {
+      const exclusionConditions = wasExcluded.flatMap((row) =>
+        buildExclusionRowConditions(
+          String(row.brandName || ""),
+          String(row.domain || "")
+        )
+      );
+
+      if (exclusionConditions.length > 0) {
+        const removed = await (ExcludedBrand as any).deleteMany({
+          $or: exclusionConditions
+        });
+        removedExclusions = Number(removed?.deletedCount || 0);
+      }
+    }
+
     return res.json({
       success: true,
       action,
-      updated: ids.length
+      updated: ids.length,
+      removedExclusions
     });
   } catch (error: any) {
     res.status(500).json({
