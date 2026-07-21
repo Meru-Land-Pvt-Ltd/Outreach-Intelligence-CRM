@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
-import { ExternalLink, RotateCcw, Send } from "lucide-react";
+import { ExternalLink, FileUp, RotateCcw, Send } from "lucide-react";
 import { apiGet, apiPost } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import AdminTable, {
@@ -12,6 +12,7 @@ import { FilterSearchInput } from "@/components/shared/filter-search-input";
 import { FilterSelect } from "@/components/shared/filter-select";
 import { Notice } from "@/components/shared/notice";
 import { CreateCampaignDialog } from "@/components/instantly/create-campaign-dialog";
+import { ImportLeadsDialog } from "@/components/instantly/import-leads-dialog";
 
 type Channel = "Enoylity Technology" | "MHD Tech";
 
@@ -296,6 +297,7 @@ export function ChannelLeadsPage({
 
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [dialogOpen, setDialogOpen] = useState(false);
+  const [importOpen, setImportOpen] = useState(false);
   const [unpushing, setUnpushing] = useState(false);
   const [notice, setNotice] = useState<{
     type: "success" | "error";
@@ -719,13 +721,25 @@ export function ChannelLeadsPage({
             {description}
           </p>
         </div>
-        <Button
-          variant="outline"
-          onClick={() => router.push(campaignsHref)}
-          className="h-11 rounded-xl"
-        >
-          View Campaigns
-        </Button>
+        <div className="flex flex-wrap items-center gap-2">
+          <Button
+            variant="outline"
+            onClick={() => setImportOpen(true)}
+            title="Upload a CSV of inbound leads; they join this table unpushed and use the normal campaign flow"
+            className="h-11 rounded-xl"
+          >
+            <FileUp className="mr-2 h-4 w-4" />
+            Import CSV
+          </Button>
+
+          <Button
+            variant="outline"
+            onClick={() => router.push(campaignsHref)}
+            className="h-11 rounded-xl"
+          >
+            View Campaigns
+          </Button>
+        </div>
       </div>
 
       <section className="space-y-3">
@@ -849,6 +863,20 @@ export function ChannelLeadsPage({
           loading,
           showSummary: true,
           showRowsSelector: false,
+        }}
+      />
+
+      <ImportLeadsDialog
+        open={importOpen}
+        channel={channel}
+        onClose={() => setImportOpen(false)}
+        onImported={(summary) => {
+          setImportOpen(false);
+          if (summary) {
+            setNotice({ type: "success", text: summary });
+          }
+          setFoundVia("CSV Import");
+          loadRows();
         }}
       />
 

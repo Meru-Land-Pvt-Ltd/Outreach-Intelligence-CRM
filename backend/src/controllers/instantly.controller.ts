@@ -4073,3 +4073,210 @@ export async function releasePushedLeads(req: Request, res: Response) {
     });
   }
 }
+
+// Asset/code files a CSV export can carry as fake emails (same guard the
+// worker applies to scraped emails, e.g. "swiper@12.min.css").
+const IMPORT_ASSET_EMAIL_REGEX =
+  /(\.(css|js|mjs|cjs|ts|json|map|scss|less|png|jpe?g|svg|webp|gif|woff2?|ttf|otf|eot|ico|mp4|webm|mp3|wav|pdf|xml|yml|yaml)$)|(@\d+(\.\d+)*\.)|(\.min\.)/i;
+
+function isValidImportEmail(email: string) {
+  if (!email) return false;
+
+  const lower = email.toLowerCase();
+
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(lower)) return false;
+  if (IMPORT_ASSET_EMAIL_REGEX.test(lower)) return false;
+
+  const tld = lower.split(".").pop() || "";
+
+  return /^[a-z]{2,}$/.test(tld);
+}
+
+// CSV import of inbound leads. Rows land as normal unpushed InstantlyLead
+// rows (foundVia "CSV Import"), so the existing campaign flow — select →
+// Create Campaign → preview → push with all safety checks — works on them
+// unchanged. Emails already bounced on any channel carry the bounce flags
+// over so push-time validation keeps rejecting them.
+export async function importInboundLeads(req: Request, res: Response) {
+  try {
+    const channel = cleanText(req.body?.channel);
+    const inputRows: any[] = Array.isArray(req.body?.leads)
+      ? req.body.leads
+      : [];
+
+    if (!["Enoylity Technology", "MHD Tech"].includes(channel)) {
+      return res.status(400).json({
+        success: false,
+        message: "channel must be Enoylity Technology or MHD Tech"
+      });
+    }
+
+    if (inputRows.length === 0) {
+      return res.status(400).json({
+        success: false,
+        message: "leads is required"
+      });
+    }
+
+    if (inputRows.length > 500) {
+      return res.status(400).json({
+        success: false,
+        message: "Too many leads in one request (max 500 per batch)."
+      });
+    }
+
+    const cfg = getChannelConfig(channel);
+    const importedBy = String((req as any).user?.email || "");
+    const importedAt = new Date();
+
+    const invalidSamples: Array<{ email: string; reason: string }> = [];
+    let invalid = 0;
+    let duplicates = 0;
+
+    const seen = new Set<string>();
+    const candidates: any[] = [];
+
+    for (const row of inputRows) {
+      const email = cleanEmail(row?.email);
+
+      if (!isValidImportEmail(email)) {
+        invalid += 1;
+        if (invalidSamples.length < 10) {
+          invalidSamples.push({
+            email: cleanText(row?.email) || "(empty)",
+            reason: "Invalid email address"
+          });
+        }
+        continue;
+      }
+
+      if (seen.has(email)) {
+        duplicates += 1;
+        continue;
+      }
+      seen.add(email);
+
+      const companyName = cleanText(row?.companyName);
+
+      candidates.push({
+        channel,
+        email,
+        firstName: cleanText(row?.firstName),
+        companyName,
+        productName:
+          cleanText(row?.productName) ||
+          (companyName ? `${companyName} products` : ""),
+        relatedVideo: cfg.relatedVideo,
+        competitor1: "",
+        competitor2: "",
+        pushedStatus: "",
+        verificationStatus: "",
+        instantlyBounced: "",
+        gatewayBounced: "Not Checked",
+        foundVia: "CSV Import",
+        pgaScore: null,
+        campaignName: "",
+        raw: {
+          source: "csv-import",
+          importedBy,
+          importedAt,
+          website: cleanText(row?.website),
+          niche: cleanText(row?.niche)
+        }
+      });
+    }
+
+    if (candidates.length === 0) {
+      return res.json({
+        success: true,
+        inserted: 0,
+        duplicates,
+        invalid,
+        invalidSamples,
+        total: inputRows.length
+      });
+    }
+
+    const candidateEmails = candidates.map((c) => c.email);
+
+    // Already in this channel → skip, never overwrite crawled data.
+    const existing = await (InstantlyLead as any)
+      .find({ channel, email: { $in: candidateEmails } }, { email: 1 })
+      .lean();
+    const existingEmails = new Set(
+      (existing as any[]).map((r) => cleanEmail(r.email))
+    );
+
+    // Bounce carry-over from any channel, so a known-bad address cannot
+    // re-enter as a fresh clean row.
+    const bouncedSiblings = await (InstantlyLead as any)
+      .find(
+        { email: { $in: candidateEmails } },
+        { email: 1, instantlyBounced: 1, gatewayBounced: 1 }
+      )
+      .lean();
+    const bounceByEmail = new Map<string, any>();
+
+    for (const sibling of bouncedSiblings as any[]) {
+      if (
+        isBounceRejected(sibling.instantlyBounced) ||
+        isBounceRejected(sibling.gatewayBounced)
+      ) {
+        bounceByEmail.set(cleanEmail(sibling.email), sibling);
+      }
+    }
+
+    const docs = candidates
+      .filter((c) => {
+        if (existingEmails.has(c.email)) {
+          duplicates += 1;
+          return false;
+        }
+        return true;
+      })
+      .map((c) => {
+        const bounced = bounceByEmail.get(c.email);
+
+        if (!bounced) return c;
+
+        return {
+          ...c,
+          instantlyBounced: cleanText(bounced.instantlyBounced) || "",
+          gatewayBounced:
+            cleanText(bounced.gatewayBounced) || "Not Checked"
+        };
+      });
+
+    let inserted = 0;
+
+    if (docs.length > 0) {
+      try {
+        const result = await (InstantlyLead as any).insertMany(docs, {
+          ordered: false
+        });
+        inserted = result.length;
+      } catch (error: any) {
+        // ordered:false inserts what it can; duplicates that raced in
+        // between our check and the insert surface here as write errors.
+        inserted = Array.isArray(error?.insertedDocs)
+          ? error.insertedDocs.length
+          : 0;
+        duplicates += docs.length - inserted;
+      }
+    }
+
+    res.json({
+      success: true,
+      inserted,
+      duplicates,
+      invalid,
+      invalidSamples,
+      total: inputRows.length
+    });
+  } catch (error: any) {
+    res.status(500).json({
+      success: false,
+      message: error.message
+    });
+  }
+}

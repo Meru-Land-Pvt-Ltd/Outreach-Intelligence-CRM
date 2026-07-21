@@ -13,6 +13,7 @@ import {
   getSenders,
   getTemplatePreview,
   getTemplates,
+  importInboundLeads,
   previewSelectedCampaign,
   pullBouncedFromInstantly,
   pushSelectedCampaign,
@@ -28,6 +29,7 @@ const router = Router();
 router.post("/fill-competitors", fillCompetitors);
 
 router.get("/leads", getInstantlyLeads);
+router.post("/import-leads", importInboundLeads);
 router.get("/senders", getSenders);
 router.get("/imported-leads", getImportedLeads);
 router.get("/template-preview", getTemplatePreview);
