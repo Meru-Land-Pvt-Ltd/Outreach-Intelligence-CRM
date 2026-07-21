@@ -210,7 +210,8 @@ export function buildParseResult(fileName: string, text: string): ParseResult {
       let value = String(grid[r][index] ?? "").trim();
 
       if (field === "firstName" && value && FULL_NAME_HEADERS.has(headers[index])) {
-        value = value.split(/\s+/)[0];
+        // "Jane Smith" → "Jane"; also handles "Lee, Mark" → "Lee".
+        value = value.split(/\s+/)[0].replace(/[,;.]+$/, "");
       }
 
       (lead as any)[field] = value;
