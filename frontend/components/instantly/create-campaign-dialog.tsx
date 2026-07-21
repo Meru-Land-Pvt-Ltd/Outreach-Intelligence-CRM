@@ -67,12 +67,14 @@ export function CreateCampaignDialog({
   open,
   channel,
   leads,
+  templateType = "outbound",
   onClose,
   onPushed,
 }: {
   open: boolean;
   channel: Channel;
   leads: DialogLead[];
+  templateType?: "outbound" | "inbound";
   onClose: () => void;
   onPushed: (campaignId?: string) => void;
 }) {
@@ -160,6 +162,7 @@ export function CreateCampaignDialog({
       endTime: form.endTime,
       dailyLimit: Number(form.dailyLimit),
       selectedSenders: senders,
+      templateType,
       leadIds,
     })) as PreviewResponse;
 
@@ -190,7 +193,9 @@ export function CreateCampaignDialog({
     const response: any = await apiGet(
       `/instantly/template-preview?channel=${encodeURIComponent(
         channel
-      )}&leadId=${encodeURIComponent(leadId)}&email=${encodeURIComponent(email)}`
+      )}&leadId=${encodeURIComponent(leadId)}&email=${encodeURIComponent(
+        email
+      )}&type=${encodeURIComponent(templateType)}`
     );
 
     const data = response?.data || response?.preview;
@@ -223,6 +228,7 @@ export function CreateCampaignDialog({
       endTime: form.endTime,
       dailyLimit: Number(form.dailyLimit),
       selectedSenders: senders,
+      templateType,
       leadIds,
     });
 
@@ -256,7 +262,16 @@ export function CreateCampaignDialog({
             </h2>
             <p className="text-sm font-medium text-slate-500">
               {leads.length} lead(s) selected ·{" "}
-              {step === "form" ? "Configure" : "Preview & push"}
+              <span
+                className={
+                  templateType === "inbound"
+                    ? "font-semibold text-emerald-700"
+                    : "font-semibold text-slate-600"
+                }
+              >
+                {templateType === "inbound" ? "Inbound" : "Outbound"} template
+              </span>{" "}
+              · {step === "form" ? "Configure" : "Preview & push"}
             </p>
           </div>
           <button

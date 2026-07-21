@@ -216,10 +216,17 @@ export async function getMhdInstantlyRows(req: Request, res: Response) {
   }
 }
 
+function templateTypeFromQuery(req: Request) {
+  return String(req.query.type || "").trim().toLowerCase() === "inbound"
+    ? "inbound"
+    : "outbound";
+}
+
 export async function getEnoylityTemplateRows(req: Request, res: Response) {
   try {
     const template = await InstantlyTemplateModel.findOne({
-      channel: "Enoylity Technology"
+      channel: "Enoylity Technology",
+      templateType: templateTypeFromQuery(req)
     });
 
     const rows = [
@@ -238,7 +245,8 @@ export async function getEnoylityTemplateRows(req: Request, res: Response) {
 export async function getMhdTemplateRows(req: Request, res: Response) {
   try {
     const template = await InstantlyTemplateModel.findOne({
-      channel: "MHD Tech"
+      channel: "MHD Tech",
+      templateType: templateTypeFromQuery(req)
     });
 
     const rows = [

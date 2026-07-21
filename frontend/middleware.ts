@@ -8,6 +8,7 @@ const protectedPaths = [
   "/email-discovery",
   "/enoylity-instantly",
   "/excluded-brands",
+  "/inbound-import",
   "/instantly-campaigns",
   "/mhd-instantly",
   "/niche-analysis",

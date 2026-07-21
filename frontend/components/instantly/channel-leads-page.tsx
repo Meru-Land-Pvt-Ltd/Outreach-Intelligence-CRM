@@ -12,7 +12,6 @@ import { FilterSearchInput } from "@/components/shared/filter-search-input";
 import { FilterSelect } from "@/components/shared/filter-select";
 import { Notice } from "@/components/shared/notice";
 import { CreateCampaignDialog } from "@/components/instantly/create-campaign-dialog";
-import { ImportLeadsDialog } from "@/components/instantly/import-leads-dialog";
 
 type Channel = "Enoylity Technology" | "MHD Tech";
 
@@ -297,7 +296,6 @@ export function ChannelLeadsPage({
 
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [dialogOpen, setDialogOpen] = useState(false);
-  const [importOpen, setImportOpen] = useState(false);
   const [unpushing, setUnpushing] = useState(false);
   const [notice, setNotice] = useState<{
     type: "success" | "error";
@@ -724,8 +722,12 @@ export function ChannelLeadsPage({
         <div className="flex flex-wrap items-center gap-2">
           <Button
             variant="outline"
-            onClick={() => setImportOpen(true)}
-            title="Upload a CSV of inbound leads; they join this table unpushed and use the normal campaign flow"
+            onClick={() =>
+              router.push(
+                `/inbound-import?channel=${channel === "MHD Tech" ? "mhd" : "enoylity"}`
+              )
+            }
+            title="Upload a CSV of inbound leads and push them as an Inbound-template campaign"
             className="h-11 rounded-xl"
           >
             <FileUp className="mr-2 h-4 w-4" />
@@ -863,20 +865,6 @@ export function ChannelLeadsPage({
           loading,
           showSummary: true,
           showRowsSelector: false,
-        }}
-      />
-
-      <ImportLeadsDialog
-        open={importOpen}
-        channel={channel}
-        onClose={() => setImportOpen(false)}
-        onImported={(summary) => {
-          setImportOpen(false);
-          if (summary) {
-            setNotice({ type: "success", text: summary });
-          }
-          setFoundVia("CSV Import");
-          loadRows();
         }}
       />
 

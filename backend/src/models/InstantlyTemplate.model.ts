@@ -5,8 +5,15 @@ const InstantlyTemplateSchema = new mongoose.Schema(
     channel: {
       type: String,
       enum: ["Enoylity Technology", "MHD Tech"],
-      required: true,
-      unique: true
+      required: true
+    },
+
+    // outbound = cold outreach to crawled leads (the original flow);
+    // inbound = replies to leads who contacted us (CSV imports).
+    templateType: {
+      type: String,
+      enum: ["outbound", "inbound"],
+      default: "outbound"
     },
 
     subject: String,
@@ -16,6 +23,8 @@ const InstantlyTemplateSchema = new mongoose.Schema(
   },
   { timestamps: true }
 );
+
+InstantlyTemplateSchema.index({ channel: 1, templateType: 1 }, { unique: true });
 
 export const InstantlyTemplate: any =
   mongoose.models.InstantlyTemplate ||

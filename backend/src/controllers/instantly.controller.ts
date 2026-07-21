@@ -239,6 +239,85 @@ const DEFAULT_TEMPLATES: Record<string, any> = {
   }
 };
 
+// Inbound = the brand contacted us first (CSV-imported inquiries), so the
+// tone is a warm reply with next steps, not a cold pitch.
+const DEFAULT_INBOUND_TEMPLATES: Record<string, any> = {
+  "Enoylity Technology": {
+    subject: "{{companyName}} x Enoylity Technology - next steps for {{productName}}",
+    body:
+      "Hi {{firstName}},\n\n" +
+      "Thanks for reaching out about a collaboration with Enoylity Technology - great to hear from {{companyName}}.\n\n" +
+      "We reviewed {{productName}} and it's a strong fit for our audience of 1M+ US tech subscribers.\n\n" +
+      "Here's what a dedicated review includes:\n" +
+      "- Dedicated 8-12 min full review of {{productName}}\n" +
+      "- 500K+ average reach per video\n" +
+      "- Your tracking link at the top of the description and pinned comment\n" +
+      "- Full draft approval before publishing\n" +
+      "- US shipping - we're based in Las Vegas, NV\n\n" +
+      "You can see our recent brand work here: {{relatedVideo}}\n\n" +
+      "To lock in a slot, just reply with your preferred timeline and where you'd ship the unit from - we'll take it from there.\n\n" +
+      "Best regards,\n" +
+      "{{sendingAccountFirstName}}\n" +
+      "Enoylity Technology\n" +
+      "{{sendingAccountEmail}}",
+    followUp1:
+      "Hi {{firstName}},\n\n" +
+      "Following up on your inquiry about featuring {{productName}}. We're finalizing this month's review schedule and would love to include {{companyName}}.\n\n" +
+      "Our recent work: {{relatedVideo}}\n\n" +
+      "Reply with your preferred timeline and we'll reserve the slot.\n\n" +
+      "{{sendingAccountFirstName}}",
+    followUp2:
+      "Hello {{firstName}},\n\n" +
+      "Just closing the loop on your {{productName}} inquiry - the current review window for {{companyName}} is about to fill up.\n\n" +
+      "If the timing isn't right, no problem at all - reply anytime and we'll pick it back up. If you'd like the slot, a quick \"let's go\" is enough.\n\n" +
+      "{{sendingAccountFirstName}}\n" +
+      "Enoylity Technology"
+  },
+
+  "MHD Tech": {
+    subject: "{{companyName}} x MHD Tech - next steps for {{productName}}",
+    body:
+      "Hi {{firstName}},\n\n" +
+      "Thanks for getting in touch with MHD Tech - happy to hear from {{companyName}}.\n\n" +
+      "We took a look at {{productName}} and it fits our dedicated review format well. Our channel reaches 580K tech subscribers who actively buy what we feature.\n\n" +
+      "Here's what the review includes:\n" +
+      "- Dedicated 4-8 min full review of {{productName}}\n" +
+      "- Your tracking link at the top of the description and pinned comment\n" +
+      "- Draft shared for your approval before publishing\n" +
+      "- Easy US shipping - we're based in Torrance, CA\n\n" +
+      "Recent work: {{relatedVideo}}\n\n" +
+      "To move forward, reply with your preferred timeline and shipping details and we'll schedule {{companyName}}'s slot.\n\n" +
+      "Best,\n" +
+      "{{sendingAccountFirstName}}\n" +
+      "MHD Tech Team\n" +
+      "{{sendingAccountEmail}}",
+    followUp1:
+      "Hi {{firstName}},\n\n" +
+      "Circling back on your inquiry about a {{productName}} review. We're locking this month's schedule now and want to make sure {{companyName}} gets a slot.\n\n" +
+      "Recent work: {{relatedVideo}}\n\n" +
+      "Reply with a timeline that works and we'll confirm it.\n\n" +
+      "{{sendingAccountFirstName}}",
+    followUp2:
+      "Hello {{firstName}},\n\n" +
+      "Closing the loop on {{companyName}}'s {{productName}} inquiry - the current window is nearly full.\n\n" +
+      "If now isn't the right time, just say so and we'll follow up later. Otherwise a quick reply locks the slot in.\n\n" +
+      "{{sendingAccountFirstName}}\n" +
+      "MHD Tech"
+  }
+};
+
+function normalizeTemplateType(value: any) {
+  return String(value || "").trim().toLowerCase() === "inbound"
+    ? "inbound"
+    : "outbound";
+}
+
+function getTemplateDefaults(channel: string, templateType: string) {
+  return templateType === "inbound"
+    ? DEFAULT_INBOUND_TEMPLATES[channel]
+    : DEFAULT_TEMPLATES[channel];
+}
+
 
 function getInstantlyBouncedStatusForResponse(lead: any) {
   const value =
@@ -371,16 +450,33 @@ async function instantlyApiCall(
 }
 
 async function ensureTemplates() {
+  // Rows from before the templateType field are the outbound templates.
+  await InstantlyTemplateModel.updateMany(
+    { templateType: { $exists: false } },
+    { $set: { templateType: "outbound" } }
+  );
+
   const channels = ["Enoylity Technology", "MHD Tech"];
 
   for (const channel of channels) {
-    const existing = await InstantlyTemplateModel.findOne({ channel });
-
-    if (!existing) {
-      await InstantlyTemplateModel.create({
+    for (const templateType of ["outbound", "inbound"]) {
+      const existing = await InstantlyTemplateModel.findOne({
         channel,
-        ...DEFAULT_TEMPLATES[channel]
+        templateType
       });
+
+      if (!existing) {
+        try {
+          await InstantlyTemplateModel.create({
+            channel,
+            templateType,
+            ...getTemplateDefaults(channel, templateType)
+          });
+        } catch {
+          // Tolerate the legacy unique-per-channel index until the
+          // migrateTemplateTypes script swaps it for {channel, templateType}.
+        }
+      }
     }
   }
 }
@@ -1518,16 +1614,21 @@ async function createAndPushCampaign(input: {
   selectedSenders?: any[];
   usedEmails?: Record<string, boolean>;
   niche?: string;
+  templateType?: string;
   explicitLeads?: { leadsToPush: any[]; leadIds: any[] };
 }) {
   await ensureTemplates();
 
+  const templateType = normalizeTemplateType(input.templateType);
   const template = await InstantlyTemplateModel.findOne({
-    channel: input.channel
+    channel: input.channel,
+    templateType
   });
 
   if (!template) {
-    throw new Error("Template not found for " + input.channel);
+    throw new Error(
+      `${templateType} template not found for ` + input.channel
+    );
   }
 
   const searchResult = await instantlyApiCall(
@@ -2880,7 +2981,10 @@ export async function getTemplates(req: Request, res: Response) {
   try {
     await ensureTemplates();
 
-    const rows = await InstantlyTemplateModel.find({}).sort({ channel: 1 });
+    const rows = await InstantlyTemplateModel.find({}).sort({
+      channel: 1,
+      templateType: 1
+    });
 
     res.json({
       success: true,
@@ -2895,6 +2999,7 @@ export async function getTemplates(req: Request, res: Response) {
 export async function saveTemplate(req: Request, res: Response) {
   try {
     const { channel, subject, body, followUp1, followUp2 } = req.body;
+    const templateType = normalizeTemplateType(req.body?.templateType);
 
     if (!channel) {
       return res.status(400).json({
@@ -2904,7 +3009,7 @@ export async function saveTemplate(req: Request, res: Response) {
     }
 
     const row = await InstantlyTemplateModel.findOneAndUpdate(
-      { channel },
+      { channel, templateType },
       {
         $set: {
           subject,
@@ -2995,11 +3100,15 @@ export async function getTemplatePreview(req: Request, res: Response) {
     const channel = cleanText(req.query.channel || "Enoylity Technology");
     const leadId = cleanText(req.query.leadId);
     const email = cleanEmail(req.query.email);
+    const templateType = normalizeTemplateType(req.query.type);
 
     const cfg = getChannelConfig(channel);
     const senderEmail = cfg.senders[0] || cfg.allSenders?.[0] || "";
 
-    const template = await InstantlyTemplateModel.findOne({ channel });
+    const template = await InstantlyTemplateModel.findOne({
+      channel,
+      templateType
+    });
 
     const requestedLeadQuery: any = { channel };
 
@@ -3426,6 +3535,7 @@ function buildPushConfig(body: any) {
     selectedSenders: Array.isArray(body.selectedSenders)
       ? body.selectedSenders
       : [],
+    templateType: normalizeTemplateType(body.templateType),
     leadIds: Array.isArray(body.leadIds)
       ? body.leadIds.map((id: any) => String(id))
       : []
@@ -3470,7 +3580,8 @@ export async function previewSelectedCampaign(req: Request, res: Response) {
 
     await ensureTemplates();
     const template = await InstantlyTemplateModel.findOne({
-      channel: cfg.channel
+      channel: cfg.channel,
+      templateType: cfg.templateType
     });
 
     const payload = template
@@ -3480,6 +3591,7 @@ export async function previewSelectedCampaign(req: Request, res: Response) {
     res.json({
       success: true,
       nameConflict,
+      templateType: cfg.templateType,
       eligibleCount: leadsToPush.length,
       rejected,
       leadIds: leadIds.map((id: any) => String(id)),
@@ -3549,6 +3661,7 @@ export async function pushSelectedCampaign(req: Request, res: Response) {
       endTime: cfg.endTime,
       dailyLimit: cfg.dailyLimit,
       selectedSenders: cfg.selectedSenders,
+      templateType: cfg.templateType,
       explicitLeads: { leadsToPush, leadIds }
     });
 
@@ -4201,7 +4314,10 @@ export async function importInboundLeads(req: Request, res: Response) {
 
     // Already in this channel → skip, never overwrite crawled data.
     const existing = await (InstantlyLead as any)
-      .find({ channel, email: { $in: candidateEmails } }, { email: 1 })
+      .find(
+        { channel, email: { $in: candidateEmails } },
+        { email: 1, firstName: 1, companyName: 1, productName: 1 }
+      )
       .lean();
     const existingEmails = new Set(
       (existing as any[]).map((r) => cleanEmail(r.email))
@@ -4248,22 +4364,34 @@ export async function importInboundLeads(req: Request, res: Response) {
       });
 
     let inserted = 0;
+    let insertedDocs: any[] = [];
 
     if (docs.length > 0) {
       try {
-        const result = await (InstantlyLead as any).insertMany(docs, {
+        insertedDocs = await (InstantlyLead as any).insertMany(docs, {
           ordered: false
         });
-        inserted = result.length;
+        inserted = insertedDocs.length;
       } catch (error: any) {
         // ordered:false inserts what it can; duplicates that raced in
         // between our check and the insert surface here as write errors.
-        inserted = Array.isArray(error?.insertedDocs)
-          ? error.insertedDocs.length
-          : 0;
+        insertedDocs = Array.isArray(error?.insertedDocs)
+          ? error.insertedDocs
+          : [];
+        inserted = insertedDocs.length;
         duplicates += docs.length - inserted;
       }
     }
+
+    // Every lead from this file that now exists on the channel (new +
+    // pre-existing), so the UI can jump straight into campaign creation.
+    const toLeadRef = (row: any) => ({
+      _id: String(row._id),
+      firstName: cleanText(row.firstName),
+      email: cleanEmail(row.email),
+      companyName: cleanText(row.companyName),
+      productName: cleanText(row.productName)
+    });
 
     res.json({
       success: true,
@@ -4271,7 +4399,11 @@ export async function importInboundLeads(req: Request, res: Response) {
       duplicates,
       invalid,
       invalidSamples,
-      total: inputRows.length
+      total: inputRows.length,
+      leads: [
+        ...insertedDocs.map(toLeadRef),
+        ...(existing as any[]).map(toLeadRef)
+      ]
     });
   } catch (error: any) {
     res.status(500).json({

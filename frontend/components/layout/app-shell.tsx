@@ -12,6 +12,7 @@ import {
   ChevronsRight,
   CreditCard,
   FileText,
+  FileUp,
   Home,
   LogOut,
   Menu,
@@ -79,6 +80,12 @@ const navItems: NavItem[] = [
     href: "/mhd-instantly",
     activePath: "/mhd-instantly",
     icon: Megaphone,
+  },
+  {
+    title: "Inbound Import",
+    href: "/inbound-import",
+    activePath: "/inbound-import",
+    icon: FileUp,
   },
   {
     title: "Instantly",

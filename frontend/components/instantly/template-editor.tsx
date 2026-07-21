@@ -257,6 +257,12 @@ export function TemplateEditor({
   const [originalTemplate, setOriginalTemplate] =
     useState<TemplateState>(emptyTemplate);
 
+  // outbound = cold outreach to crawled leads; inbound = replies to leads
+  // who contacted us (CSV imports).
+  const [templateType, setTemplateType] = useState<"outbound" | "inbound">(
+    "outbound"
+  );
+
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
 
@@ -344,12 +350,29 @@ export function TemplateEditor({
     setSelectedVariable(undefined);
   }
 
-  async function loadTemplate() {
+  function switchTemplateType(nextType: "outbound" | "inbound") {
+    if (nextType === templateType) return;
+
+    if (
+      changed &&
+      !window.confirm("Discard unsaved changes and switch template type?")
+    ) {
+      return;
+    }
+
+    setTemplateType(nextType);
+  }
+
+  async function loadTemplate(typeOverride?: "outbound" | "inbound") {
     setLoading(true);
     setMessage("");
 
+    const activeType = typeOverride || templateType;
+
     try {
-      const response = await apiGet(fetchEndpoint);
+      const response = await apiGet(
+        `${fetchEndpoint}?type=${encodeURIComponent(activeType)}`
+      );
       const next = templateFromResponse(response);
 
       setTemplate(next);
@@ -372,6 +395,7 @@ export function TemplateEditor({
     try {
       const response = await apiPost("/instantly/templates", {
         channel,
+        templateType,
         subject: template.subject,
         body: template.body,
         followUp1: template.followUp1,
@@ -384,7 +408,9 @@ export function TemplateEditor({
 
       setOriginalTemplate(template);
       setMessageType("success");
-      setMessage(`${title} saved successfully.`);
+      setMessage(
+        `${title} (${templateType === "inbound" ? "Inbound" : "Outbound"}) saved successfully.`
+      );
     } catch (error: any) {
       setMessageType("error");
       setMessage(error?.message || "Template save failed.");
@@ -394,8 +420,9 @@ export function TemplateEditor({
   }
 
   useEffect(() => {
-    loadTemplate();
-  }, []);
+    loadTemplate(templateType);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [templateType]);
 
   const messageClasses =
     messageType === "success"
@@ -459,6 +486,34 @@ export function TemplateEditor({
             {saving ? "Saving..." : changed ? "Save Changes" : "Saved"}
           </Button>
         </div>
+      </div>
+
+      <div className="flex w-fit items-center gap-1 rounded-xl border border-slate-200 bg-white p-1 shadow-sm">
+        {(
+          [
+            { value: "outbound", label: "Outbound", hint: "Crawled leads (cold outreach)" },
+            { value: "inbound", label: "Inbound", hint: "CSV imports (they contacted you)" },
+          ] as const
+        ).map((tab) => (
+          <button
+            key={tab.value}
+            type="button"
+            onClick={() => switchTemplateType(tab.value)}
+            title={tab.hint}
+            className={
+              templateType === tab.value
+                ? "rounded-lg bg-blue-600 px-4 py-2 text-sm font-bold text-white"
+                : "rounded-lg px-4 py-2 text-sm font-bold text-slate-500 hover:bg-slate-50"
+            }
+          >
+            {tab.label}
+          </button>
+        ))}
+        <span className="px-3 text-xs font-medium text-slate-400">
+          {templateType === "inbound"
+            ? "Used by Inbound Import campaigns"
+            : "Used by crawled-lead campaigns"}
+        </span>
       </div>
 
       {message ? (
