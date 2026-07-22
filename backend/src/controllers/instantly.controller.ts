@@ -957,6 +957,55 @@ function isBounceRejected(value: any) {
   ].includes(status);
 }
 
+function isLeadRowBounced(row: any) {
+  return (
+    isBounceRejected(row?.instantlyBounced) ||
+    isBounceRejected(row?.gatewayBounced) ||
+    Boolean(row?.raw?.instantlyBouncedAt)
+  );
+}
+
+// Cross-channel bounce sync: an email that bounced in ANY channel's
+// campaigns must never be pushed from another channel. Returns
+// email -> channel it bounced on, for every input email with a bounced
+// sibling row anywhere.
+async function getCrossChannelBouncedEmails(emails: string[]) {
+  const bounced = new Map<string, string>();
+  const unique = Array.from(new Set(emails.filter(Boolean)));
+
+  for (let i = 0; i < unique.length; i += 2000) {
+    const chunk = unique.slice(i, i + 2000);
+
+    const siblings = await InstantlyLeadModel.find(
+      {
+        email: { $in: chunk },
+        $or: [
+          { instantlyBounced: { $nin: ["", null] } },
+          { gatewayBounced: { $nin: ["", null, "Not Checked"] } },
+          { "raw.instantlyBouncedAt": { $exists: true } }
+        ]
+      },
+      {
+        email: 1,
+        channel: 1,
+        instantlyBounced: 1,
+        gatewayBounced: 1,
+        "raw.instantlyBouncedAt": 1
+      }
+    ).lean();
+
+    for (const row of siblings as any[]) {
+      const email = cleanEmail(row.email);
+
+      if (email && !bounced.has(email) && isLeadRowBounced(row)) {
+        bounced.set(email, cleanText(row.channel));
+      }
+    }
+  }
+
+  return bounced;
+}
+
 function isAlreadyPushed(value: any) {
   const status = String(value || "").trim().toLowerCase();
 
@@ -1215,6 +1264,10 @@ async function getEligibleLeads(input: {
     instantlyBounced: { $in: ["", null] }
   }).sort({ createdAt: 1 });
 
+  const crossChannelBounced = await getCrossChannelBouncedEmails(
+    (rows as any[]).map((row) => cleanEmail(row.email))
+  );
+
   const leadsToPush: any[] = [];
   const leadIds: any[] = [];
   const checkedGateways: Record<string, string> = {};
@@ -1226,6 +1279,21 @@ async function getEligibleLeads(input: {
 
     if (!email) continue;
     if (input.usedEmails && input.usedEmails[email]) continue;
+
+    // Bounced in another channel's campaigns → never reuse here. Stamp the
+    // row too so it drops out of the selection UI going forward.
+    const bouncedOnChannel = crossChannelBounced.get(email);
+
+    if (bouncedOnChannel && bouncedOnChannel !== input.channel) {
+      await InstantlyLeadModel.findByIdAndUpdate(row._id, {
+        $set: {
+          instantlyBounced: "Bounced",
+          "raw.instantlyBounced": `Bounced (cross-channel: ${bouncedOnChannel})`,
+          "raw.instantlyBouncedAt": new Date()
+        }
+      });
+      continue;
+    }
 
     const companyKey = cleanText(row.companyName).toLowerCase();
 
@@ -1380,6 +1448,10 @@ async function getEligibleLeadsByIds(input: {
   const rejected: Array<{ id: string; email: string; reason: string }> = [];
   const checkedGateways: Record<string, string> = {};
 
+  const crossChannelBounced = await getCrossChannelBouncedEmails(
+    (rows as any[]).map((row) => cleanEmail(row.email))
+  );
+
   for (const row of rows as any[]) {
     const id = String(row._id);
     const email = cleanEmail(row.email);
@@ -1396,6 +1468,26 @@ async function getEligibleLeadsByIds(input: {
 
     if (!isBounceRejectedEmpty(row.instantlyBounced)) {
       rejected.push({ id, email, reason: "Bounced in Instantly" });
+      continue;
+    }
+
+    // Bounced in another channel's campaigns → never reuse here. Stamp the
+    // row too so it drops out of the selection UI going forward.
+    const bouncedOnChannel = crossChannelBounced.get(email);
+
+    if (bouncedOnChannel && bouncedOnChannel !== input.channel) {
+      await InstantlyLeadModel.findByIdAndUpdate(row._id, {
+        $set: {
+          instantlyBounced: "Bounced",
+          "raw.instantlyBounced": `Bounced (cross-channel: ${bouncedOnChannel})`,
+          "raw.instantlyBouncedAt": new Date()
+        }
+      });
+      rejected.push({
+        id,
+        email,
+        reason: `Bounced on ${bouncedOnChannel} (cross-channel sync)`
+      });
       continue;
     }
 
@@ -2132,6 +2224,33 @@ async function safeUpsertInstantlyLead(input: any) {
     return { lead: existing, created: false, updated: false, skipped: true };
   }
 
+  // Cross-channel bounce sync: a brand-new row for an email that already
+  // bounced in any channel's campaigns inherits the bounce, so it can
+  // never be selected or pushed from this channel either.
+  let inheritedBounce = "";
+
+  if (!existing) {
+    const bouncedSibling = await InstantlyLeadModel.findOne(
+      {
+        email,
+        $or: [
+          { instantlyBounced: { $nin: ["", null] } },
+          { gatewayBounced: { $nin: ["", null, "Not Checked"] } },
+          { "raw.instantlyBouncedAt": { $exists: true } }
+        ]
+      },
+      {
+        instantlyBounced: 1,
+        gatewayBounced: 1,
+        "raw.instantlyBouncedAt": 1
+      }
+    ).lean();
+
+    if (bouncedSibling && isLeadRowBounced(bouncedSibling)) {
+      inheritedBounce = "Bounced";
+    }
+  }
+
   const payload = {
     ...input,
     channel,
@@ -2142,7 +2261,7 @@ async function safeUpsertInstantlyLead(input: any) {
 
   const insertDefaults = {
     pushedStatus: cleanText(input.pushedStatus) || "",
-    instantlyBounced: cleanText(input.instantlyBounced) || "",
+    instantlyBounced: cleanText(input.instantlyBounced) || inheritedBounce,
     gatewayBounced: cleanText(input.gatewayBounced) || "",
     competitor1: cleanText(input.competitor1) || "",
     competitor2: cleanText(input.competitor2) || ""

@@ -356,6 +356,58 @@ async function safeUpsertInstantlyLead(input: any) {
     return { lead: existing, created: false, updated: false, skipped: true };
   }
 
+  // Cross-channel bounce sync: a brand-new row for an email that already
+  // bounced in any channel's campaigns inherits the bounce, so it can
+  // never be selected or pushed from this channel either. (Twin of the
+  // backend safeUpsertInstantlyLead — keep in lockstep.)
+  let inheritedBounce = "";
+
+  if (!existing) {
+    const bouncedSibling: any = await InstantlyLeadModel.findOne(
+      {
+        email,
+        $or: [
+          { instantlyBounced: { $nin: ["", null] } },
+          { gatewayBounced: { $nin: ["", null, "Not Checked"] } },
+          { "raw.instantlyBouncedAt": { $exists: true } }
+        ]
+      },
+      {
+        instantlyBounced: 1,
+        gatewayBounced: 1,
+        "raw.instantlyBouncedAt": 1
+      }
+    ).lean();
+
+    if (bouncedSibling) {
+      // Same values the backend's isBounceRejected treats as bounced.
+      const bouncedValue = (value: any) => {
+        const status = cleanText(value).toLowerCase();
+        return [
+          "yes",
+          "true",
+          "1",
+          "bounced",
+          "bounce",
+          "hard-bounce",
+          "gateway-bounced",
+          "instantly-bounced",
+          "failed",
+          "blocked",
+          "invalid"
+        ].includes(status);
+      };
+
+      if (
+        bouncedValue(bouncedSibling.instantlyBounced) ||
+        bouncedValue(bouncedSibling.gatewayBounced) ||
+        Boolean(bouncedSibling.raw?.instantlyBouncedAt)
+      ) {
+        inheritedBounce = "Bounced";
+      }
+    }
+  }
+
   const payload = {
     ...input,
     channel,
@@ -366,7 +418,7 @@ async function safeUpsertInstantlyLead(input: any) {
 
   const insertDefaults = {
     pushedStatus: cleanText(input.pushedStatus) || "",
-    instantlyBounced: cleanText(input.instantlyBounced) || "",
+    instantlyBounced: cleanText(input.instantlyBounced) || inheritedBounce,
     gatewayBounced: cleanText(input.gatewayBounced) || "",
     competitor1: cleanText(input.competitor1) || "",
     competitor2: cleanText(input.competitor2) || ""
