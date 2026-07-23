@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import {
   ArrowLeft,
@@ -37,11 +37,16 @@ type ImportedLead = {
 
 type ImportResult = {
   inserted: number;
+  updated: number;
   duplicates: number;
   invalid: number;
   invalidSamples: Array<{ email: string; reason: string }>;
   leads: ImportedLead[];
 };
+
+// The in-progress flow survives navigation (edit templates, check a table,
+// browser back): parsed rows and import results are kept per tab.
+const STORAGE_KEY = "inbound-import-state-v1";
 
 const CHANNELS: Array<{ value: Channel; slug: string; label: string; blurb: string }> = [
   {
@@ -115,6 +120,52 @@ export function InboundImportPage({ initialChannel }: { initialChannel?: string 
 
   const [campaignOpen, setCampaignOpen] = useState(false);
   const [pushedNotice, setPushedNotice] = useState("");
+  const [hydrated, setHydrated] = useState(false);
+
+  // Restore an in-progress flow after navigation/back.
+  useEffect(() => {
+    try {
+      const raw = sessionStorage.getItem(STORAGE_KEY);
+
+      if (raw) {
+        const saved = JSON.parse(raw);
+
+        if (saved && (saved.parsed || saved.result)) {
+          if (
+            saved.channel === "MHD Tech" ||
+            saved.channel === "Enoylity Technology"
+          ) {
+            setChannel(saved.channel);
+          }
+          if (saved.parsed) setParsed(saved.parsed);
+          if (saved.result) setResult(saved.result);
+        }
+      }
+    } catch {
+      // Corrupt or unavailable storage: start fresh.
+    }
+
+    setHydrated(true);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  useEffect(() => {
+    if (!hydrated) return;
+
+    try {
+      if (parsed || result) {
+        sessionStorage.setItem(
+          STORAGE_KEY,
+          JSON.stringify({ channel, parsed, result })
+        );
+      } else {
+        sessionStorage.removeItem(STORAGE_KEY);
+      }
+    } catch {
+      // Storage full or unavailable: the flow still works, it just will
+      // not survive navigation.
+    }
+  }, [hydrated, channel, parsed, result]);
 
   const step = result ? (campaignOpen ? 3 : 2) : parsed ? 1 : 0;
   const channelMeta = CHANNELS.find((c) => c.value === channel)!;
@@ -133,6 +184,9 @@ export function InboundImportPage({ initialChannel }: { initialChannel?: string 
     setImportError("");
     setPushedNotice("");
     if (fileInputRef.current) fileInputRef.current.value = "";
+    try {
+      sessionStorage.removeItem(STORAGE_KEY);
+    } catch {}
   }
 
   async function handleFile(file: File | undefined | null) {
@@ -186,6 +240,7 @@ export function InboundImportPage({ initialChannel }: { initialChannel?: string 
 
     const totals: ImportResult = {
       inserted: 0,
+      updated: 0,
       duplicates: 0,
       invalid: 0,
       invalidSamples: [],
@@ -205,6 +260,7 @@ export function InboundImportPage({ initialChannel }: { initialChannel?: string 
       }
 
       totals.inserted += Number(response.inserted || 0);
+      totals.updated += Number(response.updated || 0);
       totals.duplicates += Number(response.duplicates || 0);
       totals.invalid += Number(response.invalid || 0);
 
@@ -397,7 +453,7 @@ export function InboundImportPage({ initialChannel }: { initialChannel?: string 
                 <tr>
                   <th className="px-3 py-2 font-semibold">#</th>
                   <th className="px-3 py-2 font-semibold">Email</th>
-                  <th className="px-3 py-2 font-semibold">First Name</th>
+                  <th className="px-3 py-2 font-semibold">POC / Name</th>
                   <th className="px-3 py-2 font-semibold">Company</th>
                   <th className="px-3 py-2 font-semibold">Product</th>
                   <th className="px-3 py-2 font-semibold">Website</th>
@@ -440,7 +496,9 @@ export function InboundImportPage({ initialChannel }: { initialChannel?: string 
 
           <Notice
             type="success"
-            text={`Import complete: ${result.inserted} imported, ${result.duplicates} already existed, ${result.invalid} invalid skipped. ${result.leads.length} lead(s) from this file are ready for a campaign.`}
+            text={`Import complete: ${result.inserted} imported${
+              result.updated ? `, ${result.updated} refreshed from the file` : ""
+            }, ${result.duplicates} already existed, ${result.invalid} invalid skipped. ${result.leads.length} lead(s) from this file are ready for a campaign.`}
           />
 
           {result.invalidSamples.length > 0 ? (
@@ -507,6 +565,9 @@ export function InboundImportPage({ initialChannel }: { initialChannel?: string 
           setPushedNotice(
             "Campaign pushed with the Inbound template. Redirecting to campaigns…"
           );
+          try {
+            sessionStorage.removeItem(STORAGE_KEY);
+          } catch {}
           if (campaignId) {
             router.push(campaignsHref);
           }

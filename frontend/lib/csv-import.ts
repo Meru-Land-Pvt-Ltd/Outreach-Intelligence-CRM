@@ -66,26 +66,9 @@ const HEADER_ALIASES: Record<string, string[]> = {
   niche: ["niche", "category", "industry", "vertical", "segment"],
 };
 
-// Headers that usually hold a full name: keep only the first word so the
-// {{firstName}} template variable reads naturally ("Hi Jane" not
-// "Hi Jane Smith").
-const FULL_NAME_HEADERS = new Set([
-  "name",
-  "full name",
-  "contact name",
-  "contact",
-  "poc",
-  "poc name",
-  "point of contact",
-  "contact person",
-  "person",
-  "spoc",
-  "lead name",
-]);
-
 export const FIELD_LABELS: Record<string, string> = {
   email: "Email",
-  firstName: "First Name",
+  firstName: "POC / Name",
   companyName: "Company",
   productName: "Product",
   website: "Website",
@@ -207,14 +190,9 @@ export function buildParseResult(fileName: string, text: string): ParseResult {
     columnField.forEach((field, index) => {
       if (!field) return;
 
-      let value = String(grid[r][index] ?? "").trim();
-
-      if (field === "firstName" && value && FULL_NAME_HEADERS.has(headers[index])) {
-        // "Jane Smith" → "Jane"; also handles "Lee, Mark" → "Lee".
-        value = value.split(/\s+/)[0].replace(/[,;.]+$/, "");
-      }
-
-      (lead as any)[field] = value;
+      // Names are kept exactly as written in the CSV — a POC column's full
+      // name ("Jane Smith") stays the full name.
+      (lead as any)[field] = String(grid[r][index] ?? "").trim();
     });
 
     if (!lead.email) {

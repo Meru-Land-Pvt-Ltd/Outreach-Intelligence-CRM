@@ -4431,15 +4431,24 @@ export async function importInboundLeads(req: Request, res: Response) {
 
     const candidateEmails = candidates.map((c) => c.email);
 
-    // Already in this channel → skip, never overwrite crawled data.
+    // Existing rows on this channel: CSV-imported unpushed rows get their
+    // fields refreshed from the new file (so re-uploading a corrected CSV
+    // fixes names); crawled or already-pushed rows are never overwritten.
     const existing = await (InstantlyLead as any)
       .find(
         { channel, email: { $in: candidateEmails } },
-        { email: 1, firstName: 1, companyName: 1, productName: 1 }
+        {
+          email: 1,
+          firstName: 1,
+          companyName: 1,
+          productName: 1,
+          pushedStatus: 1,
+          foundVia: 1
+        }
       )
       .lean();
-    const existingEmails = new Set(
-      (existing as any[]).map((r) => cleanEmail(r.email))
+    const existingByEmail = new Map<string, any>(
+      (existing as any[]).map((r) => [cleanEmail(r.email), r])
     );
 
     // Bounce carry-over from any channel, so a known-bad address cannot
@@ -4461,26 +4470,75 @@ export async function importInboundLeads(req: Request, res: Response) {
       }
     }
 
-    const docs = candidates
-      .filter((c) => {
-        if (existingEmails.has(c.email)) {
+    const toLeadRef = (row: any) => ({
+      _id: String(row._id),
+      firstName: cleanText(row.firstName),
+      email: cleanEmail(row.email),
+      companyName: cleanText(row.companyName),
+      productName: cleanText(row.productName)
+    });
+
+    const docs: any[] = [];
+    const refreshOps: any[] = [];
+    const refreshedRefs: any[] = [];
+    const duplicateRefs: any[] = [];
+    let updated = 0;
+
+    for (const c of candidates) {
+      const existingRow = existingByEmail.get(c.email);
+
+      if (existingRow) {
+        const isPushed = Boolean(cleanText(existingRow.pushedStatus));
+        const isCsvRow = cleanText(existingRow.foundVia) === "CSV Import";
+
+        if (!isPushed && isCsvRow) {
+          const set: any = {
+            "raw.reimportedAt": importedAt,
+            "raw.reimportedBy": importedBy
+          };
+
+          if (c.firstName) set.firstName = c.firstName;
+          if (c.companyName) set.companyName = c.companyName;
+          if (c.productName) set.productName = c.productName;
+          if (c.raw.website) set["raw.website"] = c.raw.website;
+          if (c.raw.niche) set["raw.niche"] = c.raw.niche;
+
+          refreshOps.push({
+            updateOne: { filter: { _id: existingRow._id }, update: { $set: set } }
+          });
+          refreshedRefs.push({
+            _id: String(existingRow._id),
+            firstName: c.firstName || cleanText(existingRow.firstName),
+            email: c.email,
+            companyName: c.companyName || cleanText(existingRow.companyName),
+            productName: c.productName || cleanText(existingRow.productName)
+          });
+          updated += 1;
+        } else {
           duplicates += 1;
-          return false;
+          duplicateRefs.push(toLeadRef(existingRow));
         }
-        return true;
-      })
-      .map((c) => {
-        const bounced = bounceByEmail.get(c.email);
 
-        if (!bounced) return c;
+        continue;
+      }
 
-        return {
-          ...c,
-          instantlyBounced: cleanText(bounced.instantlyBounced) || "",
-          gatewayBounced:
-            cleanText(bounced.gatewayBounced) || "Not Checked"
-        };
+      const bounced = bounceByEmail.get(c.email);
+
+      if (!bounced) {
+        docs.push(c);
+        continue;
+      }
+
+      docs.push({
+        ...c,
+        instantlyBounced: cleanText(bounced.instantlyBounced) || "",
+        gatewayBounced: cleanText(bounced.gatewayBounced) || "Not Checked"
       });
+    }
+
+    if (refreshOps.length > 0) {
+      await (InstantlyLead as any).bulkWrite(refreshOps, { ordered: false });
+    }
 
     let inserted = 0;
     let insertedDocs: any[] = [];
@@ -4502,26 +4560,21 @@ export async function importInboundLeads(req: Request, res: Response) {
       }
     }
 
-    // Every lead from this file that now exists on the channel (new +
-    // pre-existing), so the UI can jump straight into campaign creation.
-    const toLeadRef = (row: any) => ({
-      _id: String(row._id),
-      firstName: cleanText(row.firstName),
-      email: cleanEmail(row.email),
-      companyName: cleanText(row.companyName),
-      productName: cleanText(row.productName)
-    });
-
+    // Every lead from this file that now exists on the channel (new,
+    // refreshed and pre-existing), so the UI can jump straight into
+    // campaign creation.
     res.json({
       success: true,
       inserted,
+      updated,
       duplicates,
       invalid,
       invalidSamples,
       total: inputRows.length,
       leads: [
         ...insertedDocs.map(toLeadRef),
-        ...(existing as any[]).map(toLeadRef)
+        ...refreshedRefs,
+        ...duplicateRefs
       ]
     });
   } catch (error: any) {
