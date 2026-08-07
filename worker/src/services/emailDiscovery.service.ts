@@ -10,6 +10,7 @@ import { PipelineTracker } from "../models/PipelineTracker.model";
 import { logDone, logError } from "./runLog.service";
 import { searchProspeoContacts } from "./prospeo.service";
 import { getAppSettings, AppSettings } from "./appSettings.service";
+import { generateAiText } from "./aiText.service";
 import {
   ProviderContact,
   buildApolloPocSelectionPrompt,
@@ -392,9 +393,7 @@ async function aiFindSocialUrls(
   domain: string,
   missing: string[]
 ): Promise<Record<string, string>> {
-  const key = process.env.OPENAI_API_KEY || "";
-
-  if (!key || missing.length === 0) {
+  if (missing.length === 0) {
     return {};
   }
 
@@ -410,27 +409,11 @@ async function aiFindSocialUrls(
     "Return JSON only with keys instagram, twitter, facebook, linkedin, youtube. Use empty string if unsure.";
 
   try {
-    const response = await axios.post(
-      process.env.OPENAI_CHAT_COMPLETIONS_URL ||
-        "https://api.openai.com/v1/chat/completions",
-      {
-        model: process.env.OPENAI_MODEL || "gpt-4.1-mini",
-        messages: [
-          { role: "system", content: "Return valid JSON only." },
-          { role: "user", content: prompt }
-        ],
-        temperature: 0
-      },
-      {
-        headers: {
-          Authorization: "Bearer " + key,
-          "Content-Type": "application/json"
-        },
-        timeout: 60000
-      }
-    );
-
-    let text = String(response.data?.choices?.[0]?.message?.content || "");
+    let text = await generateAiText({
+      prompt,
+      system: "Return valid JSON only.",
+      temperature: 0
+    });
     text = text
       .replace(/^```json/i, "")
       .replace(/^```/i, "")
@@ -694,36 +677,18 @@ async function aiSelectApolloPOCs(
   people: any[],
   settings: AppSettings
 ) {
-  const key = process.env.OPENAI_API_KEY || "";
-
-  if (!key || people.length === 0) {
+  if (people.length === 0) {
     return fallbackApolloPocSelection(people, settings);
   }
 
   const prompt = buildApolloPocSelectionPrompt(brandName, people, settings);
 
   try {
-    const response = await axios.post(
-      process.env.OPENAI_CHAT_COMPLETIONS_URL ||
-        "https://api.openai.com/v1/chat/completions",
-      {
-        model: process.env.OPENAI_MODEL || "gpt-4.1-mini",
-        messages: [
-          { role: "system", content: "Return valid JSON only." },
-          { role: "user", content: prompt }
-        ],
-        temperature: 0
-      },
-      {
-        headers: {
-          Authorization: "Bearer " + key,
-          "Content-Type": "application/json"
-        },
-        timeout: 60000
-      }
-    );
-
-    let text = String(response.data?.choices?.[0]?.message?.content || "");
+    let text = await generateAiText({
+      prompt,
+      system: "Return valid JSON only.",
+      temperature: 0
+    });
     text = text
       .replace(/^```json/i, "")
       .replace(/^```/i, "")

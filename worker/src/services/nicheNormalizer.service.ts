@@ -1,6 +1,7 @@
 import axios from "axios";
 import { NicheAlias } from "../models/NicheAlias.model";
 import { AppSettings } from "./appSettings.service";
+import { generateAiText } from "./aiText.service";
 
 // Maps free-form AI niche labels onto the canonical category list so the
 // niche filter, niche-scoped push and Instantly tags share one vocabulary.
@@ -26,10 +27,6 @@ async function askOpenAiForCanonical(
   rawNiche: string,
   canonical: string[]
 ): Promise<string> {
-  const key = process.env.OPENAI_API_KEY || "";
-
-  if (!key) return FALLBACK_NICHE;
-
   const prompt =
     'Map the niche label "' +
     rawNiche +
@@ -41,27 +38,12 @@ async function askOpenAiForCanonical(
     '".';
 
   try {
-    const response = await axios.post(
-      process.env.OPENAI_CHAT_COMPLETIONS_URL ||
-        "https://api.openai.com/v1/chat/completions",
-      {
-        model: process.env.OPENAI_MODEL || "gpt-4.1-mini",
-        messages: [
-          { role: "system", content: "Return valid JSON only." },
-          { role: "user", content: prompt }
-        ],
-        temperature: 0
-      },
-      {
-        headers: {
-          Authorization: "Bearer " + key,
-          "Content-Type": "application/json"
-        },
-        timeout: 30000
-      }
-    );
-
-    let text = String(response.data?.choices?.[0]?.message?.content || "");
+    let text = await generateAiText({
+      prompt,
+      system: "Return valid JSON only.",
+      temperature: 0,
+      timeoutMs: 30000
+    });
     text = text
       .replace(/```json/gi, "")
       .replace(/```/g, "")

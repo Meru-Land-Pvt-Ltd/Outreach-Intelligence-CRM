@@ -11,6 +11,7 @@ import { PushLog } from "../models/PushLog.model";
 import { BounceEvent } from "../models/BounceEvent.model";
 import { safeEqual } from "./auth.controller";
 import { getAppSettings } from "./settings.controller";
+import { generateAiText } from "../utils/aiText";
 
 const ROLE_TIER_PATTERNS: Array<{ tier: number; pattern: RegExp }> = [
   {
@@ -1934,12 +1935,11 @@ function parseCompetitorBatchResponse(text: string, requestedCompanies: string[]
 }
 
 async function askOpenAIForCompetitorBatch(companyNames: string[]) {
-  const key = process.env.OPENAI_API_KEY || "";
   const cleanCompanies = Array.from(
     new Set(companyNames.map(cleanText).filter(Boolean))
   );
 
-  if (!key || cleanCompanies.length === 0) {
+  if (cleanCompanies.length === 0) {
     return {} as Record<string, { competitor1: string; competitor2: string }>;
   }
 
@@ -1955,38 +1955,21 @@ async function askOpenAIForCompetitorBatch(companyNames: string[]) {
     '{"results":[{"brand":"Company Name","competitor1":"Brand A","competitor2":"Brand B"}]}';
 
   try {
-    const response = await axios.post(
-      process.env.OPENAI_CHAT_COMPLETIONS_URL ||
-      "https://api.openai.com/v1/chat/completions",
-      {
-        model: process.env.OPENAI_MODEL || "gpt-4.1-mini",
-        messages: [
-          {
-            role: "system",
-            content:
-              "You are a market research assistant. Always respond with valid JSON only."
-          },
-          {
-            role: "user",
-            content: prompt
-          }
-        ],
+    // Uses the AI provider/model configured in Settings (OpenAI, Gemini or
+    // Claude) — no hardcoded env key.
+    const text = (
+      await generateAiText({
+        prompt,
+        system:
+          "You are a market research assistant. Always respond with valid JSON only.",
         temperature: 0.2
-      },
-      {
-        headers: {
-          Authorization: "Bearer " + key,
-          "Content-Type": "application/json"
-        },
-        timeout: 60000
-      }
-    );
+      })
+    ).trim();
 
-    const text = String(response.data?.choices?.[0]?.message?.content || "").trim();
     return parseCompetitorBatchResponse(text, cleanCompanies);
   } catch (error: any) {
     console.error(
-      "Competitor OpenAI batch failed:",
+      "Competitor AI batch failed:",
       error?.response?.data || error.message
     );
 

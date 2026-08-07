@@ -1,6 +1,7 @@
 import axios from "axios";
 import { LatestReview } from "../models/LatestReview.model";
 import { logDone, logError } from "./runLog.service";
+import { generateAiText } from "./aiText.service";
 
 const LatestReviewModel = LatestReview as any;
 
@@ -97,10 +98,6 @@ function secondsToDuration(seconds: number) {
 }
 
 async function aiNicheForVideo(title: string) {
-  const key = process.env.OPENAI_API_KEY || "";
-
-  if (!key) return "";
-
   const prompt =
     "Classify this YouTube review video into one short niche label.\n\n" +
     "Title: " +
@@ -108,30 +105,13 @@ async function aiNicheForVideo(title: string) {
     "\n\nReturn only the niche name.";
 
   try {
-    const response = await axios.post(
-      process.env.OPENAI_CHAT_COMPLETIONS_URL ||
-        "https://api.openai.com/v1/chat/completions",
-      {
-        model: process.env.OPENAI_MODEL || "gpt-4.1-mini",
-        messages: [
-          { role: "system", content: "Return only a short niche label." },
-          { role: "user", content: prompt }
-        ],
-        temperature: 0
-      },
-      {
-        headers: {
-          Authorization: "Bearer " + key,
-          "Content-Type": "application/json"
-        },
-        timeout: 60000
-      }
-    );
+    const text = await generateAiText({
+      prompt,
+      system: "Return only a short niche label.",
+      temperature: 0
+    });
 
-    return String(response.data?.choices?.[0]?.message?.content || "")
-      .trim()
-      .split("\n")[0]
-      .trim();
+    return text.trim().split("\n")[0].trim();
   } catch {
     return "";
   }

@@ -1,6 +1,7 @@
 import axios from "axios";
 import { BrandMap } from "../models/BrandMap.model";
 import { PipelineTracker } from "../models/PipelineTracker.model";
+import { generateAiText } from "./aiText.service";
 
 const BrandMapModel = BrandMap as any;
 const PipelineTrackerModel = PipelineTracker as any;
@@ -98,10 +99,6 @@ async function lookupWithClearbit(brandName: string) {
 }
 
 async function lookupWithOpenAI(brandName: string, productName?: string) {
-  const key = process.env.OPENAI_API_KEY || "";
-
-  if (!key) return "";
-
   const prompt =
     "Find the official website domain for this brand.\n\n" +
     "Brand: " +
@@ -118,33 +115,11 @@ async function lookupWithOpenAI(brandName: string, productName?: string) {
     '{"domain":"example.com"}';
 
   try {
-    const response = await axios.post(
-      process.env.OPENAI_CHAT_COMPLETIONS_URL ||
-        "https://api.openai.com/v1/chat/completions",
-      {
-        model: process.env.OPENAI_MODEL || "gpt-4.1-mini",
-        messages: [
-          {
-            role: "system",
-            content: "Return valid JSON only."
-          },
-          {
-            role: "user",
-            content: prompt
-          }
-        ],
-        temperature: 0
-      },
-      {
-        headers: {
-          Authorization: "Bearer " + key,
-          "Content-Type": "application/json"
-        },
-        timeout: 60000
-      }
-    );
-
-    let text = String(response.data?.choices?.[0]?.message?.content || "");
+    let text = await generateAiText({
+      prompt,
+      system: "Return valid JSON only.",
+      temperature: 0
+    });
     text = text
       .replace(/^```json/i, "")
       .replace(/^```/i, "")

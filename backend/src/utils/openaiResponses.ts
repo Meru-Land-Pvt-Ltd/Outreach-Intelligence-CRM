@@ -1,13 +1,28 @@
 import axios from "axios";
 import { env } from "../config/env";
+import { getActiveAiConfig } from "./aiText";
 
 // OpenAI Responses API with the web_search tool. Ported from the worker's
 // openaiResponses.service so the backend can run on-demand intent scans.
+// web_search is an OpenAI-only capability: when the Settings page has an
+// OpenAI key saved, that key/model is used; otherwise it falls back to the
+// legacy OPENAI_API_KEY env var.
 export async function callOpenAIWithWebSearch(prompt: string, model?: string) {
+  const config = await getActiveAiConfig();
+  const useSettings = config?.provider === "openai" && config.source === "settings";
+  const apiKey = useSettings ? config!.apiKey : env.openaiApiKey;
+  const defaultModel = useSettings ? config!.model : env.openaiModel || "gpt-4.1-mini";
+
+  if (!apiKey) {
+    throw new Error(
+      "Web search needs an OpenAI API key (save an OpenAI key in Settings)."
+    );
+  }
+
   const response = await axios.post(
     env.openaiResponsesUrl || "https://api.openai.com/v1/responses",
     {
-      model: model || env.openaiModel || "gpt-4.1-mini",
+      model: model || defaultModel,
       tools: [{ type: "web_search" }],
       tool_choice: "required",
       input: prompt,
@@ -15,7 +30,7 @@ export async function callOpenAIWithWebSearch(prompt: string, model?: string) {
     },
     {
       headers: {
-        Authorization: "Bearer " + env.openaiApiKey,
+        Authorization: "Bearer " + apiKey,
         "Content-Type": "application/json"
       },
       timeout: 120000

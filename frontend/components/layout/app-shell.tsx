@@ -19,6 +19,7 @@ import {
   Megaphone,
   PlayCircle,
   Search,
+  Settings,
   ShieldX,
   Workflow,
   X,
@@ -150,6 +151,12 @@ const navItems: NavItem[] = [
     href: "/api-billing",
     activePath: "/api-billing",
     icon: CreditCard,
+  },
+  {
+    title: "Settings",
+    href: "/settings",
+    activePath: "/settings",
+    icon: Settings,
   },
   {
     title: "Run Log",

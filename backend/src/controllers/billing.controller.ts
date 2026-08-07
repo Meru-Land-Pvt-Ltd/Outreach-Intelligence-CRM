@@ -1,5 +1,10 @@
 import { Request, Response } from "express";
 import axios from "axios";
+import {
+  AI_PROVIDER_LABELS,
+  generateAiText,
+  getActiveAiConfig
+} from "../utils/aiText";
 
 // Live billing/credit status for every external API the pipeline uses.
 // Providers that expose balances (Hunter, MillionVerifier, Prospeo) report
@@ -43,69 +48,86 @@ function report(
   return { provider, label, status, detail, credits, checkedAt: nowIso() };
 }
 
-async function probeOpenAi(): Promise<ProviderReport> {
-  const key = process.env.OPENAI_API_KEY || "";
+// Probes whichever AI provider/model is configured in Settings (OpenAI,
+// Gemini or Claude), so this row always reflects the key/model the platform
+// actually uses. Falls back to the legacy env key when nothing is saved.
+async function probeAiModel(): Promise<ProviderReport> {
+  const config = await getActiveAiConfig();
 
-  if (!key) {
-    return report("openai", "OpenAI", "not_configured", "OPENAI_API_KEY missing");
+  if (!config) {
+    return report(
+      "ai",
+      "AI Model",
+      "not_configured",
+      "No AI model configured — choose a provider, API key and model in Settings."
+    );
   }
 
+  const label =
+    "AI Model — " + AI_PROVIDER_LABELS[config.provider] + " (" + config.model + ")";
+  const sourceNote =
+    config.source === "settings"
+      ? "Configured in Settings."
+      : "Using legacy OPENAI_API_KEY from .env — save a key in Settings to manage it from the UI.";
+
   try {
-    // OpenAI does not expose balance via API keys — a 1-token completion
-    // (fraction of a cent) is the reliable recharge check.
-    const response = await axios.post(
-      process.env.OPENAI_CHAT_COMPLETIONS_URL ||
-        "https://api.openai.com/v1/chat/completions",
-      {
-        model: process.env.OPENAI_MODEL || "gpt-4.1-mini",
-        messages: [{ role: "user", content: "ping" }],
-        max_tokens: 1
-      },
-      {
-        headers: { Authorization: "Bearer " + key },
-        timeout: PROBE_TIMEOUT_MS,
-        validateStatus: () => true
-      }
+    // Providers do not expose balances on API keys — a 1-token generation is
+    // the reliable "does this key+model actually work" check.
+    await generateAiText({
+      prompt: "ping",
+      maxTokens: 1,
+      timeoutMs: PROBE_TIMEOUT_MS
+    });
+
+    return report(
+      "ai",
+      label,
+      "ok",
+      "API responding — key and model working. " + sourceNote
     );
-
-    if (response.status === 200) {
-      return report(
-        "openai",
-        "OpenAI",
-        "ok",
-        "API responding — credits available. (OpenAI hides exact balance; see platform.openai.com/usage.)"
-      );
-    }
-
+  } catch (error: any) {
+    const status = error?.response?.status;
     const message = String(
-      response.data?.error?.message || response.statusText || ""
+      error?.response?.data?.error?.message ||
+        error?.response?.data?.error?.status ||
+        error?.message ||
+        ""
     );
 
     if (
-      response.status === 429 &&
+      status === 429 &&
       (message.toLowerCase().includes("quota") ||
-        String(response.data?.error?.code || "").includes("insufficient_quota"))
+        String(error?.response?.data?.error?.code || "").includes(
+          "insufficient_quota"
+        ))
     ) {
+      return report("ai", label, "exhausted", "Out of credits: " + message.slice(0, 180));
+    }
+
+    if (status === 401 || status === 403) {
       return report(
-        "openai",
-        "OpenAI",
-        "exhausted",
-        "Out of credits: " + message.slice(0, 180)
+        "ai",
+        label,
+        "invalid_key",
+        "API key rejected (" + status + "). Update it in Settings."
       );
     }
 
-    if (response.status === 401) {
-      return report("openai", "OpenAI", "invalid_key", "API key rejected (401).");
+    if (status === 404) {
+      return report(
+        "ai",
+        label,
+        "error",
+        'Model "' + config.model + '" not found for this key — pick another model in Settings.'
+      );
     }
 
     return report(
-      "openai",
-      "OpenAI",
+      "ai",
+      label,
       "error",
-      "HTTP " + response.status + ": " + message.slice(0, 160)
+      (status ? "HTTP " + status + ": " : "") + message.slice(0, 160)
     );
-  } catch (error: any) {
-    return report("openai", "OpenAI", "error", error?.message || "Probe failed");
   }
 }
 
@@ -471,7 +493,7 @@ export async function getBillingStatus(req: Request, res: Response) {
     }
 
     const results = await Promise.allSettled([
-      probeOpenAi(),
+      probeAiModel(),
       probeYoutube(),
       probeHunter(),
       probeApollo(),
@@ -484,7 +506,7 @@ export async function getBillingStatus(req: Request, res: Response) {
       if (result.status === "fulfilled") return result.value;
 
       const names = [
-        ["openai", "OpenAI"],
+        ["ai", "AI Model"],
         ["youtube", "YouTube Data API"],
         ["hunter", "Hunter.io"],
         ["apollo", "Apollo.io"],

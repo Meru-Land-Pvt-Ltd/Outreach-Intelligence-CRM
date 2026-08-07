@@ -1,5 +1,4 @@
-import axios from "axios";
-import { env } from "../config/env";
+import { generateAiText } from "./aiText.service";
 
 function sleep(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -19,37 +18,15 @@ function getRetryDelayMs(error: any, attempt: number) {
   return attempt * 5000;
 }
 
+// Text generation via the AI provider/model configured in Settings
+// (OpenAI, Gemini or Claude), with the same rate-limit retry behavior the
+// old OpenAI-only version had.
 export async function callOpenAIText(prompt: string) {
-  if (!env.openaiApiKey) {
-    throw new Error("OPENAI_API_KEY is missing in worker/.env");
-  }
-
   const maxAttempts = 3;
 
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     try {
-      const response = await axios.post(
-        env.openaiChatCompletionsUrl,
-        {
-          model: env.openaiModel,
-          messages: [
-            {
-              role: "user",
-              content: prompt
-            }
-          ],
-          temperature: 0
-        },
-        {
-          headers: {
-            Authorization: "Bearer " + env.openaiApiKey,
-            "Content-Type": "application/json"
-          },
-          timeout: 60000
-        }
-      );
-
-      return response.data.choices?.[0]?.message?.content || "";
+      return await generateAiText({ prompt, temperature: 0 });
     } catch (error: any) {
       const status = error?.response?.status;
       const message =
@@ -57,18 +34,18 @@ export async function callOpenAIText(prompt: string) {
         error?.response?.data?.message ||
         error.message;
 
-      console.error("OpenAI error:", status, message);
+      console.error("AI error:", status, message);
 
       if (status === 429 && attempt < maxAttempts) {
         const delayMs = getRetryDelayMs(error, attempt);
-        console.log("OpenAI rate limited. Retrying in " + delayMs + "ms...");
+        console.log("AI rate limited. Retrying in " + delayMs + "ms...");
         await sleep(delayMs);
         continue;
       }
 
-      throw new Error("OpenAI request failed: " + status + " - " + message);
+      throw new Error("AI request failed: " + (status || "") + " - " + message);
     }
   }
 
-  throw new Error("OpenAI request failed after retries");
+  throw new Error("AI request failed after retries");
 }
