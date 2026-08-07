@@ -7,6 +7,7 @@ import {
   AiProvider,
   clearAiConfigCache
 } from "../utils/aiText";
+import { clearBillingReportCache } from "./billing.controller";
 
 const AiSettingModel = AiSetting as any;
 
@@ -266,8 +267,10 @@ export async function saveAiSettings(req: Request, res: Response) {
     ).lean();
 
     // Backend picks the change up immediately; the worker's 60s config cache
-    // refreshes on its own.
+    // refreshes on its own. The billing report cache is cleared too so the
+    // API Billing page shows the new provider/model right away.
     clearAiConfigCache();
+    clearBillingReportCache();
 
     res.json({
       success: true,

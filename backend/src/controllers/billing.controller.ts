@@ -32,7 +32,23 @@ type ProviderReport = {
 const PROBE_TIMEOUT_MS = 10000;
 const CACHE_TTL_MS = 10 * 60 * 1000;
 
-let cachedReport: { data: ProviderReport[]; loadedAt: number } | null = null;
+let cachedReport: {
+  data: ProviderReport[];
+  loadedAt: number;
+  aiSignature: string;
+} | null = null;
+
+// Called when AI settings are saved so the billing page immediately reflects
+// the newly chosen provider/model instead of a cached probe.
+export function clearBillingReportCache() {
+  cachedReport = null;
+}
+
+async function getAiSignature() {
+  const config = await getActiveAiConfig();
+
+  return config ? config.provider + ":" + config.model + ":" + config.source : "none";
+}
 
 function nowIso() {
   return new Date().toISOString();
@@ -478,10 +494,12 @@ async function probeInstantly(): Promise<ProviderReport> {
 export async function getBillingStatus(req: Request, res: Response) {
   try {
     const forceRefresh = String(req.query.refresh || "") === "1";
+    const aiSignature = await getAiSignature();
 
     if (
       !forceRefresh &&
       cachedReport &&
+      cachedReport.aiSignature === aiSignature &&
       Date.now() - cachedReport.loadedAt < CACHE_TTL_MS
     ) {
       return res.json({
@@ -518,7 +536,7 @@ export async function getBillingStatus(req: Request, res: Response) {
       return report(names[0], names[1], "error", "Probe crashed");
     });
 
-    cachedReport = { data, loadedAt: Date.now() };
+    cachedReport = { data, loadedAt: Date.now(), aiSignature };
 
     res.json({ success: true, cached: false, data });
   } catch (error: any) {
