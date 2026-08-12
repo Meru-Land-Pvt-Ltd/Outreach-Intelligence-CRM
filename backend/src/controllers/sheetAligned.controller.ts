@@ -216,6 +216,35 @@ export async function getMhdInstantlyRows(req: Request, res: Response) {
   }
 }
 
+// Multiple named templates can exist per channel+type; the sheet view shows
+// the requested name, falling back to "Default", then the oldest one.
+async function findTemplateForRows(req: Request, channel: string) {
+  const templateType = templateTypeFromQuery(req);
+  const name = String(req.query.name || "").trim();
+
+  if (name) {
+    const byName = await InstantlyTemplateModel.findOne({
+      channel,
+      templateType,
+      name
+    });
+
+    if (byName) return byName;
+  }
+
+  const byDefault = await InstantlyTemplateModel.findOne({
+    channel,
+    templateType,
+    name: "Default"
+  });
+
+  if (byDefault) return byDefault;
+
+  return InstantlyTemplateModel.findOne({ channel, templateType }).sort({
+    createdAt: 1
+  });
+}
+
 function templateTypeFromQuery(req: Request) {
   return String(req.query.type || "").trim().toLowerCase() === "inbound"
     ? "inbound"
@@ -224,10 +253,10 @@ function templateTypeFromQuery(req: Request) {
 
 export async function getEnoylityTemplateRows(req: Request, res: Response) {
   try {
-    const template = await InstantlyTemplateModel.findOne({
-      channel: "Enoylity Technology",
-      templateType: templateTypeFromQuery(req)
-    });
+    const template = await findTemplateForRows(
+      req,
+      "Enoylity Technology"
+    );
 
     const rows = [
       { field: "Subject", content: template?.subject || "" },
@@ -244,10 +273,7 @@ export async function getEnoylityTemplateRows(req: Request, res: Response) {
 
 export async function getMhdTemplateRows(req: Request, res: Response) {
   try {
-    const template = await InstantlyTemplateModel.findOne({
-      channel: "MHD Tech",
-      templateType: templateTypeFromQuery(req)
-    });
+    const template = await findTemplateForRows(req, "MHD Tech");
 
     const rows = [
       { field: "Subject", content: template?.subject || "" },

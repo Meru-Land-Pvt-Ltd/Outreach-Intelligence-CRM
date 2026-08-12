@@ -1,8 +1,8 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Save, Wand2 } from "lucide-react";
-import { apiGet, apiPost } from "@/lib/api";
+import { Plus, Save, Trash2, Wand2 } from "lucide-react";
+import { apiDelete, apiGet, apiPost } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { DataSection } from "@/components/shared/data-section";
@@ -49,10 +49,6 @@ const supportedVariables = [
   "{{sendingAccountEmail}}",
 ];
 
-function clean(value: any) {
-  return String(value || "").trim();
-}
-
 function normalizeTemplateContent(value: any) {
   return String(value || "")
     .replace(/\\r\\n/g, "\n")
@@ -76,48 +72,6 @@ function normalizeTemplateContent(value: any) {
     .map((line) => line.replace(/[ \t]+$/g, ""))
     .join("\n")
     .trim();
-}
-
-function normalizeFieldName(field: any): TemplateField | "" {
-  const value = clean(field).toLowerCase().replace(/[^a-z0-9]/g, "");
-
-  if (value === "subject") return "subject";
-  if (value === "body" || value === "emailbody" || value === "mainbody") {
-    return "body";
-  }
-  if (value === "followup1" || value === "followupone") return "followUp1";
-  if (value === "followup2" || value === "followuptwo") return "followUp2";
-
-  return "";
-}
-
-function rowsToTemplate(rows: any[]): TemplateState {
-  const next = { ...emptyTemplate };
-
-  for (const row of rows || []) {
-    const key = normalizeFieldName(row.field || row.key || row.name);
-
-    if (key) {
-      next[key] = normalizeTemplateContent(row.content ?? row.value ?? row.text);
-    }
-  }
-
-  return next;
-}
-
-function templateFromResponse(response: any): TemplateState {
-  const data = response?.data || response?.template || response;
-
-  if (Array.isArray(data)) {
-    return rowsToTemplate(data);
-  }
-
-  return {
-    subject: normalizeTemplateContent(data?.subject),
-    body: normalizeTemplateContent(data?.body),
-    followUp1: normalizeTemplateContent(data?.followUp1),
-    followUp2: normalizeTemplateContent(data?.followUp2),
-  };
 }
 
 function Textarea({
@@ -242,17 +196,27 @@ function FieldEditor({
   );
 }
 
+type TemplateRow = {
+  _id: string;
+  name: string;
+} & TemplateState;
+
 export function TemplateEditor({
   title,
   description,
   channel,
-  fetchEndpoint,
 }: {
   title: string;
   description?: string;
   channel: "Enoylity Technology" | "MHD Tech";
-  fetchEndpoint: string;
+  fetchEndpoint?: string;
 }) {
+  const [templates, setTemplates] = useState<TemplateRow[]>([]);
+  // A template's Mongo id, or "new" while creating a fresh one.
+  const [selectedId, setSelectedId] = useState<string>("");
+  const [templateName, setTemplateName] = useState("");
+  const [originalName, setOriginalName] = useState("");
+
   const [template, setTemplate] = useState<TemplateState>(emptyTemplate);
   const [originalTemplate, setOriginalTemplate] =
     useState<TemplateState>(emptyTemplate);
@@ -265,6 +229,7 @@ export function TemplateEditor({
 
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
+  const [deleting, setDeleting] = useState(false);
 
   const [message, setMessage] = useState("");
   const [messageType, setMessageType] = useState<"info" | "success" | "error">(
@@ -286,8 +251,11 @@ export function TemplateEditor({
   const followUp2Ref = useRef<HTMLTextAreaElement | null>(null);
 
   const changed = useMemo(() => {
-    return JSON.stringify(template) !== JSON.stringify(originalTemplate);
-  }, [template, originalTemplate]);
+    return (
+      JSON.stringify(template) !== JSON.stringify(originalTemplate) ||
+      templateName.trim() !== originalName
+    );
+  }, [template, originalTemplate, templateName, originalName]);
 
   function getActiveElement(field: TemplateField) {
     if (field === "subject") return subjectRef.current;
@@ -363,39 +331,114 @@ export function TemplateEditor({
     setTemplateType(nextType);
   }
 
-  async function loadTemplate(typeOverride?: "outbound" | "inbound") {
+  function rowToState(row: TemplateRow | undefined): TemplateState {
+    return {
+      subject: normalizeTemplateContent(row?.subject),
+      body: normalizeTemplateContent(row?.body),
+      followUp1: normalizeTemplateContent(row?.followUp1),
+      followUp2: normalizeTemplateContent(row?.followUp2),
+    };
+  }
+
+  function applySelection(rows: TemplateRow[], id: string) {
+    if (id === "new") {
+      setSelectedId("new");
+      setTemplateName("");
+      setOriginalName("");
+      setTemplate(emptyTemplate);
+      setOriginalTemplate(emptyTemplate);
+      return;
+    }
+
+    const row = rows.find((item) => item._id === id) || rows[0];
+
+    if (!row) {
+      applySelection(rows, "new");
+      return;
+    }
+
+    const state = rowToState(row);
+
+    setSelectedId(row._id);
+    setTemplateName(row.name || "Default");
+    setOriginalName((row.name || "Default").trim());
+    setTemplate(state);
+    setOriginalTemplate(state);
+  }
+
+  function selectTemplate(id: string) {
+    if (id === selectedId) return;
+
+    if (
+      changed &&
+      !window.confirm("Discard unsaved changes and switch template?")
+    ) {
+      return;
+    }
+
+    applySelection(templates, id);
+  }
+
+  async function loadTemplates(preferId?: string) {
     setLoading(true);
     setMessage("");
 
-    const activeType = typeOverride || templateType;
-
     try {
-      const response = await apiGet(
-        `${fetchEndpoint}?type=${encodeURIComponent(activeType)}`
+      const response: any = await apiGet(
+        `/instantly/templates?channel=${encodeURIComponent(
+          channel
+        )}&type=${encodeURIComponent(templateType)}`
       );
-      const next = templateFromResponse(response);
 
-      setTemplate(next);
-      setOriginalTemplate(next);
+      const rows: TemplateRow[] = ((response?.data || []) as any[]).map(
+        (row) => ({
+          _id: String(row._id),
+          name: String(row.name || "Default"),
+          subject: String(row.subject || ""),
+          body: String(row.body || ""),
+          followUp1: String(row.followUp1 || ""),
+          followUp2: String(row.followUp2 || ""),
+        })
+      );
+
+      setTemplates(rows);
+
+      const preferred =
+        (preferId && rows.find((row) => row._id === preferId)?._id) ||
+        rows.find((row) => row.name === "Default")?._id ||
+        rows[0]?._id ||
+        "new";
+
+      applySelection(rows, preferred);
     } catch (error: any) {
       setMessageType("error");
-      setMessage(error?.message || "Failed to load template.");
-      setTemplate(emptyTemplate);
-      setOriginalTemplate(emptyTemplate);
+      setMessage(error?.message || "Failed to load templates.");
+      setTemplates([]);
+      applySelection([], "new");
     }
 
     setLoading(false);
   }
 
   async function saveTemplate() {
+    const name = templateName.trim();
+
+    if (!name) {
+      setMessageType("error");
+      setMessage("Give this template a name (e.g. Sample 1) before saving.");
+      return;
+    }
+
     setSaving(true);
     setMessageType("info");
     setMessage("Saving template...");
 
     try {
-      const response = await apiPost("/instantly/templates", {
+      const response: any = await apiPost("/instantly/templates", {
         channel,
         templateType,
+        templateId: selectedId !== "new" ? selectedId : "",
+        name,
         subject: template.subject,
         body: template.body,
         followUp1: template.followUp1,
@@ -406,10 +449,15 @@ export function TemplateEditor({
         throw new Error(response?.message || "Template save failed.");
       }
 
-      setOriginalTemplate(template);
+      const savedId = String(response?.data?._id || "");
+
+      await loadTemplates(savedId);
+
       setMessageType("success");
       setMessage(
-        `${title} (${templateType === "inbound" ? "Inbound" : "Outbound"}) saved successfully.`
+        `Template "${name}" (${
+          templateType === "inbound" ? "Inbound" : "Outbound"
+        }) saved. It now appears in the template list when pushing campaigns.`
       );
     } catch (error: any) {
       setMessageType("error");
@@ -419,8 +467,43 @@ export function TemplateEditor({
     setSaving(false);
   }
 
+  async function deleteSelectedTemplate() {
+    if (selectedId === "new" || !selectedId) return;
+
+    if (
+      !window.confirm(
+        `Delete template "${templateName || "Default"}"? Campaign pushes can no longer select it.`
+      )
+    ) {
+      return;
+    }
+
+    setDeleting(true);
+    setMessage("");
+
+    try {
+      const response: any = await apiDelete(
+        `/instantly/templates/${encodeURIComponent(selectedId)}`
+      );
+
+      if (!response?.success) {
+        throw new Error(response?.message || "Delete failed.");
+      }
+
+      await loadTemplates();
+
+      setMessageType("success");
+      setMessage(response?.message || "Template deleted.");
+    } catch (error: any) {
+      setMessageType("error");
+      setMessage(error?.message || "Delete failed.");
+    }
+
+    setDeleting(false);
+  }
+
   useEffect(() => {
-    loadTemplate(templateType);
+    loadTemplates();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [templateType]);
 
@@ -479,11 +562,38 @@ export function TemplateEditor({
           <Button
             type="button"
             onClick={saveTemplate}
-            disabled={loading || saving || !changed}
+            disabled={loading || saving || (!changed && selectedId !== "new")}
             className="h-11 rounded-xl !bg-blue-700 !text-white hover:!bg-blue-800 disabled:cursor-not-allowed disabled:opacity-50"
           >
             <Save className="mr-2 h-4 w-4" />
-            {saving ? "Saving..." : changed ? "Save Changes" : "Saved"}
+            {saving
+              ? "Saving..."
+              : selectedId === "new"
+                ? "Create Template"
+                : changed
+                  ? "Save Changes"
+                  : "Saved"}
+          </Button>
+
+          <Button
+            type="button"
+            variant="outline"
+            onClick={deleteSelectedTemplate}
+            disabled={
+              loading ||
+              deleting ||
+              selectedId === "new" ||
+              templates.length <= 1
+            }
+            title={
+              templates.length <= 1
+                ? "Cannot delete the last template — create another one first."
+                : "Delete this template"
+            }
+            className="h-11 rounded-xl !border-rose-200 !text-rose-700 hover:!bg-rose-50 disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            <Trash2 className="mr-2 h-4 w-4" />
+            {deleting ? "Deleting..." : "Delete"}
           </Button>
         </div>
       </div>
@@ -516,6 +626,45 @@ export function TemplateEditor({
         </span>
       </div>
 
+      <div className="flex flex-wrap items-center gap-2 rounded-2xl border border-slate-200 bg-white p-3 shadow-sm">
+        <span className="px-1 text-xs font-bold uppercase tracking-wide text-slate-500">
+          Templates
+        </span>
+
+        {templates.map((row) => (
+          <button
+            key={row._id}
+            type="button"
+            onClick={() => selectTemplate(row._id)}
+            className={
+              selectedId === row._id
+                ? "rounded-lg bg-blue-600 px-3 py-1.5 text-sm font-bold text-white"
+                : "rounded-lg border border-slate-200 px-3 py-1.5 text-sm font-semibold text-slate-600 hover:bg-slate-50"
+            }
+          >
+            {row.name}
+          </button>
+        ))}
+
+        <button
+          type="button"
+          onClick={() => selectTemplate("new")}
+          className={
+            selectedId === "new"
+              ? "inline-flex items-center gap-1 rounded-lg bg-emerald-600 px-3 py-1.5 text-sm font-bold text-white"
+              : "inline-flex items-center gap-1 rounded-lg border border-dashed border-emerald-300 px-3 py-1.5 text-sm font-semibold text-emerald-700 hover:bg-emerald-50"
+          }
+        >
+          <Plus className="h-3.5 w-3.5" />
+          New Template
+        </button>
+
+        <span className="ml-auto px-1 text-xs font-medium text-slate-400">
+          Each template has Main + Follow Up 1 + Follow Up 2. Pick one when
+          pushing a campaign.
+        </span>
+      </div>
+
       {message ? (
         <div
           className={`rounded-2xl border px-4 py-3 text-sm font-bold ${messageClasses}`}
@@ -537,6 +686,24 @@ export function TemplateEditor({
             </div>
           ) : (
             <>
+              <div className="space-y-2">
+                <div className="flex items-center justify-between gap-3">
+                  <label className="text-sm font-bold text-slate-800">
+                    Template Name
+                  </label>
+                </div>
+                <Input
+                  value={templateName}
+                  onChange={(event) => setTemplateName(event.target.value)}
+                  placeholder='e.g. "Sample 1"'
+                  className="h-12 max-w-md rounded-xl border-slate-200 text-sm font-medium shadow-none focus-visible:ring-4 focus-visible:ring-blue-50"
+                />
+                <p className="text-xs font-medium text-slate-500">
+                  This name appears in the template list when creating a
+                  campaign push.
+                </p>
+              </div>
+
               <FieldEditor
                 field="subject"
                 label={fieldLabels.subject}

@@ -19,6 +19,8 @@ const InstantlyCampaignSchema = new mongoose.Schema(
     pushedAt: Date,
     activatedAt: Date,
 
+    templateName: String,
+
     raw: Object
   },
   { timestamps: true }

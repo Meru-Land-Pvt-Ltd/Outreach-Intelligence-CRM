@@ -1,6 +1,7 @@
 import { Router } from "express";
 import {
   batchPushCampaigns,
+  deleteTemplate,
   exportInstantlyLeads,
   fillCompetitors,
   getBounceEvents,
@@ -39,6 +40,7 @@ router.get("/export/status/:jobId", getInstantlyExportStatus);
 
 router.get("/templates", getTemplates);
 router.post("/templates", saveTemplate);
+router.delete("/templates/:id", deleteTemplate);
 
 router.post("/competitors/fill", fillCompetitors);
 

@@ -457,6 +457,27 @@ async function ensureTemplates() {
     { $set: { templateType: "outbound" } }
   );
 
+  // Rows from before named templates become the "Default" template.
+  await InstantlyTemplateModel.updateMany(
+    { $or: [{ name: { $exists: false } }, { name: "" }, { name: null }] },
+    { $set: { name: "Default" } }
+  );
+
+  // The legacy unique indexes ({channel} and {channel, templateType}) only
+  // allow one template per channel+type — drop them so multiple named
+  // templates can coexist under the new {channel, templateType, name} index.
+  try {
+    const indexes = await InstantlyTemplateModel.collection.indexes();
+
+    for (const index of indexes) {
+      if (["channel_1", "channel_1_templateType_1"].includes(index.name)) {
+        await InstantlyTemplateModel.collection.dropIndex(index.name);
+      }
+    }
+  } catch {
+    // Best-effort cleanup; creation below still works when nothing to drop.
+  }
+
   const channels = ["Enoylity Technology", "MHD Tech"];
 
   for (const channel of channels) {
@@ -471,15 +492,74 @@ async function ensureTemplates() {
           await InstantlyTemplateModel.create({
             channel,
             templateType,
+            name: "Default",
             ...getTemplateDefaults(channel, templateType)
           });
         } catch {
-          // Tolerate the legacy unique-per-channel index until the
-          // migrateTemplateTypes script swaps it for {channel, templateType}.
+          // Tolerate index races during first startup after the migration.
         }
       }
     }
   }
+}
+
+// Picks the template for a push: explicit templateId first, then name, then
+// the channel's "Default", then any template of that channel+type.
+async function resolveTemplateForPush(input: {
+  channel: string;
+  templateType: string;
+  templateId?: string;
+  templateName?: string;
+}) {
+  const templateId = cleanText(input.templateId);
+  const templateName = cleanText(input.templateName);
+
+  if (templateId && /^[a-f0-9]{24}$/i.test(templateId)) {
+    const byId = await InstantlyTemplateModel.findById(templateId);
+
+    if (
+      byId &&
+      byId.channel === input.channel &&
+      normalizeTemplateType(byId.templateType) === input.templateType
+    ) {
+      return byId;
+    }
+
+    throw new Error(
+      "Selected template was not found for " +
+        input.channel +
+        " (" +
+        input.templateType +
+        "). Refresh and pick a template again."
+    );
+  }
+
+  if (templateName) {
+    const byName = await InstantlyTemplateModel.findOne({
+      channel: input.channel,
+      templateType: input.templateType,
+      name: templateName
+    });
+
+    if (byName) return byName;
+
+    throw new Error(
+      'Template "' + templateName + '" was not found for ' + input.channel + "."
+    );
+  }
+
+  const byDefault = await InstantlyTemplateModel.findOne({
+    channel: input.channel,
+    templateType: input.templateType,
+    name: "Default"
+  });
+
+  if (byDefault) return byDefault;
+
+  return InstantlyTemplateModel.findOne({
+    channel: input.channel,
+    templateType: input.templateType
+  }).sort({ createdAt: 1 });
 }
 
 function getAllowedSenders(channel: string) {
@@ -1708,14 +1788,18 @@ async function createAndPushCampaign(input: {
   usedEmails?: Record<string, boolean>;
   niche?: string;
   templateType?: string;
+  templateId?: string;
+  templateName?: string;
   explicitLeads?: { leadsToPush: any[]; leadIds: any[] };
 }) {
   await ensureTemplates();
 
   const templateType = normalizeTemplateType(input.templateType);
-  const template = await InstantlyTemplateModel.findOne({
+  const template = await resolveTemplateForPush({
     channel: input.channel,
-    templateType
+    templateType,
+    templateId: input.templateId,
+    templateName: input.templateName
   });
 
   if (!template) {
@@ -1863,9 +1947,12 @@ async function createAndPushCampaign(input: {
     niches: campaignNiches,
     tagIds: campaignTagIds,
     tagError,
+    templateName: cleanText(template.name) || "Default",
     raw: {
       createResp,
-      payload
+      payload,
+      templateName: cleanText(template.name) || "Default",
+      templateId: String(template._id || "")
     }
   });
 
@@ -1876,16 +1963,24 @@ async function createAndPushCampaign(input: {
     totalPushed,
     dailyLimit: input.dailyLimit,
     status: "Success",
-    message: totalPushed + ' leads pushed to "' + input.campaignName + '"',
+    message:
+      totalPushed +
+      ' leads pushed to "' +
+      input.campaignName +
+      '" using template "' +
+      (cleanText(template.name) || "Default") +
+      '"',
     raw: {
       leads: leadsToPush.map((lead) => lead.email),
-      selectedSenders: campaignSenders
+      selectedSenders: campaignSenders,
+      templateName: cleanText(template.name) || "Default"
     }
   });
 
   return {
     campaignId,
-    totalPushed
+    totalPushed,
+    templateName: cleanText(template.name) || "Default"
   };
 }
 
@@ -3083,9 +3178,17 @@ export async function getTemplates(req: Request, res: Response) {
   try {
     await ensureTemplates();
 
-    const rows = await InstantlyTemplateModel.find({}).sort({
+    const filter: Record<string, any> = {};
+    const channel = cleanText(req.query.channel);
+    const type = cleanText(req.query.type || req.query.templateType);
+
+    if (channel) filter.channel = channel;
+    if (type) filter.templateType = normalizeTemplateType(type);
+
+    const rows = await InstantlyTemplateModel.find(filter).sort({
       channel: 1,
-      templateType: 1
+      templateType: 1,
+      name: 1
     });
 
     res.json({
@@ -3102,6 +3205,8 @@ export async function saveTemplate(req: Request, res: Response) {
   try {
     const { channel, subject, body, followUp1, followUp2 } = req.body;
     const templateType = normalizeTemplateType(req.body?.templateType);
+    const templateId = cleanText(req.body?.templateId);
+    const name = cleanText(req.body?.name) || "Default";
 
     if (!channel) {
       return res.status(400).json({
@@ -3110,8 +3215,44 @@ export async function saveTemplate(req: Request, res: Response) {
       });
     }
 
+    // Editing an existing template by id (also supports renaming it).
+    if (templateId && /^[a-f0-9]{24}$/i.test(templateId)) {
+      const duplicate = await InstantlyTemplateModel.findOne({
+        _id: { $ne: templateId },
+        channel,
+        templateType,
+        name
+      });
+
+      if (duplicate) {
+        return res.status(400).json({
+          success: false,
+          message:
+            'A template named "' + name + '" already exists for this channel.'
+        });
+      }
+
+      const row = await InstantlyTemplateModel.findOneAndUpdate(
+        { _id: templateId },
+        {
+          $set: { name, subject, body, followUp1, followUp2 }
+        },
+        { returnDocument: "after" }
+      );
+
+      if (!row) {
+        return res.status(404).json({
+          success: false,
+          message: "Template not found. Refresh and try again."
+        });
+      }
+
+      return res.json({ success: true, data: row });
+    }
+
+    // Creating (or upserting by name) a named template.
     const row = await InstantlyTemplateModel.findOneAndUpdate(
-      { channel, templateType },
+      { channel, templateType, name },
       {
         $set: {
           subject,
@@ -3129,6 +3270,54 @@ export async function saveTemplate(req: Request, res: Response) {
     res.json({
       success: true,
       data: row
+    });
+  } catch (error: any) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+}
+
+export async function deleteTemplate(req: Request, res: Response) {
+  try {
+    const templateId = cleanText(req.params.id);
+
+    if (!/^[a-f0-9]{24}$/i.test(templateId)) {
+      return res.status(400).json({
+        success: false,
+        message: "Valid template id is required"
+      });
+    }
+
+    const row = await InstantlyTemplateModel.findById(templateId);
+
+    if (!row) {
+      return res.status(404).json({
+        success: false,
+        message: "Template not found"
+      });
+    }
+
+    const siblings = await InstantlyTemplateModel.countDocuments({
+      channel: row.channel,
+      templateType: row.templateType
+    });
+
+    if (siblings <= 1) {
+      return res.status(400).json({
+        success: false,
+        message:
+          "Cannot delete the last " +
+          row.templateType +
+          " template for " +
+          row.channel +
+          ". Create another template first."
+      });
+    }
+
+    await InstantlyTemplateModel.deleteOne({ _id: templateId });
+
+    res.json({
+      success: true,
+      message: 'Template "' + (row.name || "Default") + '" deleted.'
     });
   } catch (error: any) {
     res.status(500).json({ success: false, message: error.message });
@@ -3207,9 +3396,11 @@ export async function getTemplatePreview(req: Request, res: Response) {
     const cfg = getChannelConfig(channel);
     const senderEmail = cfg.senders[0] || cfg.allSenders?.[0] || "";
 
-    const template = await InstantlyTemplateModel.findOne({
+    const template = await resolveTemplateForPush({
       channel,
-      templateType
+      templateType,
+      templateId: cleanText(req.query.templateId),
+      templateName: cleanText(req.query.templateName)
     });
 
     const requestedLeadQuery: any = { channel };
@@ -3374,7 +3565,10 @@ export async function pushToInstantly(req: Request, res: Response) {
       endTime,
       dailyLimit,
       selectedSenders,
-      niche: cleanText(req.body.niche)
+      niche: cleanText(req.body.niche),
+      templateType: req.body.templateType,
+      templateId: cleanText(req.body.templateId),
+      templateName: cleanText(req.body.templateName)
     });
 
     res.json({
@@ -3455,7 +3649,10 @@ export async function batchPushCampaigns(req: Request, res: Response) {
         dailyLimit,
         selectedSenders,
         usedEmails,
-        niche
+        niche,
+        templateType: req.body.templateType,
+        templateId: cleanText(req.body.templateId),
+        templateName: cleanText(req.body.templateName)
       });
 
       createdCampaigns += 1;
@@ -3638,6 +3835,8 @@ function buildPushConfig(body: any) {
       ? body.selectedSenders
       : [],
     templateType: normalizeTemplateType(body.templateType),
+    templateId: cleanText(body.templateId),
+    templateName: cleanText(body.templateName),
     leadIds: Array.isArray(body.leadIds)
       ? body.leadIds.map((id: any) => String(id))
       : []
@@ -3681,9 +3880,11 @@ export async function previewSelectedCampaign(req: Request, res: Response) {
     }
 
     await ensureTemplates();
-    const template = await InstantlyTemplateModel.findOne({
+    const template = await resolveTemplateForPush({
       channel: cfg.channel,
-      templateType: cfg.templateType
+      templateType: cfg.templateType,
+      templateId: cfg.templateId,
+      templateName: cfg.templateName
     });
 
     const payload = template
@@ -3694,6 +3895,7 @@ export async function previewSelectedCampaign(req: Request, res: Response) {
       success: true,
       nameConflict,
       templateType: cfg.templateType,
+      templateName: template ? cleanText(template.name) || "Default" : "",
       eligibleCount: leadsToPush.length,
       rejected,
       leadIds: leadIds.map((id: any) => String(id)),
@@ -3764,6 +3966,8 @@ export async function pushSelectedCampaign(req: Request, res: Response) {
       dailyLimit: cfg.dailyLimit,
       selectedSenders: cfg.selectedSenders,
       templateType: cfg.templateType,
+      templateId: cfg.templateId,
+      templateName: cfg.templateName,
       explicitLeads: { leadsToPush, leadIds }
     });
 

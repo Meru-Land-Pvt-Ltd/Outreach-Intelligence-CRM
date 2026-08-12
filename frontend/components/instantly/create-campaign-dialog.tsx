@@ -6,6 +6,13 @@ import { apiGet, apiPost } from "@/lib/api";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { Notice } from "@/components/shared/notice";
 
 type Channel = "Enoylity Technology" | "MHD Tech";
@@ -81,6 +88,10 @@ export function CreateCampaignDialog({
   const [step, setStep] = useState<"form" | "preview">("form");
   const [existingCampaigns, setExistingCampaigns] = useState<any[]>([]);
   const [senders, setSenders] = useState<string[]>([]);
+  const [templates, setTemplates] = useState<
+    Array<{ _id: string; name: string }>
+  >([]);
+  const [templateId, setTemplateId] = useState("");
   const [preview, setPreview] = useState<PreviewResponse | null>(null);
 
   const [busy, setBusy] = useState("");
@@ -119,17 +130,40 @@ export function CreateCampaignDialog({
     }));
 
     (async () => {
-      const [campaignsResp, sendersResp] = await Promise.all([
+      const [campaignsResp, sendersResp, templatesResp] = await Promise.all([
         apiGet(`/instantly/campaigns?channel=${encodeURIComponent(channel)}`),
         apiGet(`/instantly/senders?channel=${encodeURIComponent(channel)}`),
+        apiGet(
+          `/instantly/templates?channel=${encodeURIComponent(
+            channel
+          )}&type=${encodeURIComponent(templateType)}`
+        ),
       ]);
 
       setExistingCampaigns((campaignsResp as any)?.data || []);
       const s = (sendersResp as any)?.data || (sendersResp as any)?.senders || [];
       setSenders(Array.isArray(s) ? s : []);
+
+      const rows: any[] = (templatesResp as any)?.data || [];
+      const list = rows.map((row) => ({
+        _id: String(row._id),
+        name: String(row.name || "Default"),
+      }));
+
+      setTemplates(list);
+
+      // Preselect "Default" (or the first template) so pushing without
+      // touching the selector behaves like before.
+      const fallback = list.find((row) => row.name === "Default") || list[0];
+      setTemplateId(fallback?._id || "");
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open, channel]);
+  }, [open, channel, templateType]);
+
+  const selectedTemplateName = useMemo(
+    () => templates.find((row) => row._id === templateId)?.name || "",
+    [templates, templateId]
+  );
 
   const leadIds = useMemo(() => leads.map((lead) => lead._id), [leads]);
 
@@ -163,6 +197,7 @@ export function CreateCampaignDialog({
       dailyLimit: Number(form.dailyLimit),
       selectedSenders: senders,
       templateType,
+      templateId,
       leadIds,
     })) as PreviewResponse;
 
@@ -195,7 +230,9 @@ export function CreateCampaignDialog({
         channel
       )}&leadId=${encodeURIComponent(leadId)}&email=${encodeURIComponent(
         email
-      )}&type=${encodeURIComponent(templateType)}`
+      )}&type=${encodeURIComponent(templateType)}&templateId=${encodeURIComponent(
+        templateId
+      )}`
     );
 
     const data = response?.data || response?.preview;
@@ -229,6 +266,7 @@ export function CreateCampaignDialog({
       dailyLimit: Number(form.dailyLimit),
       selectedSenders: senders,
       templateType,
+      templateId,
       leadIds,
     });
 
@@ -289,6 +327,38 @@ export function CreateCampaignDialog({
           {step === "form" ? (
             <div className="mt-3 space-y-5">
               <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+                <label className="space-y-1.5 sm:col-span-2">
+                  <span className="text-xs font-semibold text-slate-600">
+                    Template (Main + Follow Up 1 + Follow Up 2)
+                  </span>
+                  <Select
+                    value={templateId}
+                    onValueChange={setTemplateId}
+                    disabled={templates.length === 0}
+                  >
+                    <SelectTrigger className="h-10 w-full border-slate-200">
+                      <SelectValue
+                        placeholder={
+                          templates.length === 0
+                            ? "Loading templates..."
+                            : "Choose a template"
+                        }
+                      />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {templates.map((template) => (
+                        <SelectItem key={template._id} value={template._id}>
+                          {template.name}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                  <span className="block text-[11px] font-medium text-slate-400">
+                    Manage templates in Instantly Campaigns → Template. The
+                    selected template&apos;s emails are used for this push.
+                  </span>
+                </label>
+
                 <label className="space-y-1.5 sm:col-span-2">
                   <span className="text-xs font-semibold text-slate-600">
                     Campaign Name (creates the Instantly folder)
@@ -416,6 +486,9 @@ export function CreateCampaignDialog({
                         {preview.payloadSummary.name} · daily limit{" "}
                         {preview.payloadSummary.daily_limit} ·{" "}
                         {(preview.payloadSummary.email_list || []).length} senders
+                        {selectedTemplateName
+                          ? ` · template "${selectedTemplateName}"`
+                          : ""}
                       </p>
                     ) : null}
                     {eligible === 0 ? (

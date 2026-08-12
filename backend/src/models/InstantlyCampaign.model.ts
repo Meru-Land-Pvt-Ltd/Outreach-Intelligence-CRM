@@ -27,6 +27,8 @@ const InstantlyCampaignSchema = new mongoose.Schema(
     tagIds: [String],
     tagError: String,
 
+    templateName: String,
+
     raw: Object
   },
   { timestamps: true }
